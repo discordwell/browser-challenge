@@ -1,12 +1,25 @@
 import { chromium } from "playwright";
 
-const CHALLENGE_URL = "https://serene-frangipane-7fd25b.netlify.app";
+import {
+  decryptSession,
+  encryptSession,
+  withStep30Sentinel,
+  codeForStep,
+  SENTINEL_CODE,
+} from "./session.ts";
+
+/** Challenge URL. Override with the CHALLENGE_URL env var. */
+const CHALLENGE_URL =
+  process.env.CHALLENGE_URL ?? "https://serene-frangipane-7fd25b.netlify.app";
+
+/** Run headless with HEADLESS=1; defaults to headed, as the challenge expects. */
+const HEADLESS = /^(1|true)$/i.test(process.env.HEADLESS ?? "");
 
 async function main() {
   const totalStart = performance.now();
   console.log("Launching browser...");
 
-  const browser = await chromium.launch({ headless: false });
+  const browser = await chromium.launch({ headless: HEADLESS });
   const context = await browser.newContext();
   const page = await context.newPage();
 
@@ -94,54 +107,42 @@ async function main() {
   await page.waitForURL(/step1/, { timeout: 10000 });
   console.log("On step 1. Decrypting session...");
 
-  // Decrypt session storage, inject 31st code, re-encrypt
-  const codes: string[] = await page.evaluate(() => {
-    const XOR_KEY = "WO_2024_CHALLENGE";
-    const raw = sessionStorage.getItem("wo_session");
-    if (!raw) throw new Error("No session data found");
+  // Read the raw blob from the browser, then decrypt / prepare / re-encrypt in
+  // Node with the tested helpers in session.ts. We append a sentinel so step 30
+  // has a value to submit (see withStep30Sentinel) and write the blob back so
+  // sessionStorage stays internally consistent.
+  const rawSession = await page.evaluate(() =>
+    sessionStorage.getItem("wo_session")
+  );
+  if (!rawSession) throw new Error("No session data found (wo_session)");
 
-    const decoded = atob(raw);
-    let decrypted = "";
-    for (let i = 0; i < decoded.length; i++) {
-      decrypted += String.fromCharCode(
-        decoded.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length)
-      );
-    }
-    const data = JSON.parse(decrypted);
-
-    // Inject 31st code for step 30 workaround
-    data.codes.push("FINISH");
-
-    // Re-encrypt and store back
-    const json = JSON.stringify(data);
-    let encrypted = "";
-    for (let i = 0; i < json.length; i++) {
-      encrypted += String.fromCharCode(
-        json.charCodeAt(i) ^ XOR_KEY.charCodeAt(i % XOR_KEY.length)
-      );
-    }
-    sessionStorage.setItem("wo_session", btoa(encrypted));
-    return data.codes as string[];
-  });
+  const data = withStep30Sentinel(decryptSession(rawSession));
+  const reencrypted = encryptSession(data);
+  await page.evaluate(
+    (blob) => sessionStorage.setItem("wo_session", blob),
+    reencrypted
+  );
+  const codes = data.codes;
 
   console.log(`Decrypted ${codes.length} codes.`);
 
   // Monkey-patch Map.prototype.get for step 30: validateCode(30) checks
-  // codes.get(31) which doesn't exist. Return "FINISH" for key 31 on maps
-  // with exactly 30 entries (the challenge's code map).
-  await page.evaluate(() => {
+  // codes.get(31), which doesn't exist. Return the sentinel for key 31 on maps
+  // with exactly 30 entries (the challenge's code map). The sentinel matches the
+  // one withStep30Sentinel appended above, so the submitted code validates.
+  await page.evaluate((sentinel) => {
     const originalGet = Map.prototype.get;
     Map.prototype.get = function (key: any) {
-      if (key === 31 && this.size === 30) return "FINISH";
+      if (key === 31 && this.size === 30) return sentinel;
       return originalGet.call(this, key);
     };
-  });
+  }, SENTINEL_CODE);
 
   // Solve all 30 steps
   for (let step = 1; step <= 30; step++) {
     const stepStart = performance.now();
-    // validateCode(N) checks codes.get(N+1), so submit codes[N] (0-indexed)
-    const code = codes[step];
+    // The correct submission for step N is codes[N] — see codeForStep in session.ts.
+    const code = codeForStep(codes, step);
 
     // Wait for input to appear
     try {

@@ -1,5 +1,13 @@
 # Session Summaries
 
+## 2026-06-10T08:28 UTC - Testability refactor
+- Extracted the XOR cipher + step-30 index math out of `page.evaluate` into a pure, typed `src/session.ts` (decryptSession/encryptSession/xorCipher/codeForStep/withStep30Sentinel).
+- Added `test/session.test.ts` (node:test, 9 tests). Includes an exact-bytes vector captured from the ORIGINAL inline algorithm so the refactor is provably behavior-preserving. `npm test`.
+- solve.ts now reads the raw `wo_session` blob from the browser and does crypto in Node via the tested helpers; browser-automation flow (fiber dispatch, submit, Map patch, retries) unchanged. Threaded SENTINEL_CODE into the Map patch so "FINISH" isn't duplicated.
+- Made the project actually typecheck: added @types/node, fixed tsconfig (lib esnext+DOM, skipLibCheck, allowImportingTsExtensions, noEmit, include test). `npm run typecheck` is green (was failing on Playwright's own types before — tsx had been masking it).
+- Added env overrides to solve.ts: CHALLENGE_URL, HEADLESS.
+- Added ARCHITECTURE.md; updated README (Quick Start, Development, Architecture sections).
+
 ## 2026-02-03T ~20:50 UTC - Optimization Complete
 - Optimized solver from 47.67s to 25.57s (under 30s target)
 - Key optimization: single `requestAnimationFrame` instead of double RAF + 50ms setTimeout

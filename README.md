@@ -6,7 +6,20 @@ Solves all 30 steps of the [Browser Navigation Challenge](https://serene-frangip
 
 ```bash
 npm install
-npx tsx src/solve.ts
+npm run solve        # or: npx tsx src/solve.ts
+```
+
+Override the target or run headless with env vars:
+
+```bash
+CHALLENGE_URL=https://example.com HEADLESS=1 npm run solve
+```
+
+### Development
+
+```bash
+npm test         # unit tests for the session crypto / index logic
+npm run typecheck   # tsc --noEmit over src/ and test/
 ```
 
 ## How It Works
@@ -23,7 +36,7 @@ All 30 codes are stored in `sessionStorage` from the moment the challenge starts
 sessionStorage["wo_session"] → Base64 decode → XOR with "WO_2024_CHALLENGE" → JSON
 ```
 
-We decrypt them on step 1 and never need to interact with any puzzle.
+We decrypt them on step 1 and never need to interact with any puzzle. The script reads the raw blob out of the browser and decrypts it in Node, using the tested helpers in `src/session.ts`.
 
 ### 2. React Fiber State Dispatch
 
@@ -66,10 +79,20 @@ The initial working version completed all 30 steps in ~48 seconds. Here's what g
 
 ```
 src/
-  solve.ts    # Single-file solver (~220 lines)
+  session.ts   # Pure logic: XOR cipher, decrypt/encrypt, code-for-step mapping. No browser.
+  solve.ts     # Orchestration: drives Chromium, dispatches into React, navigates steps.
+test/
+  session.test.ts   # Unit tests for session.ts (node:test)
 ```
 
-The solver is intentionally kept as a single file. Earlier versions had `src/lib/` with separate modules for session crypto, step solving, and modal handling, but they were unnecessary — the session crypto runs inline in `page.evaluate`, the step solving is a shared `addInitScript` helper, and the modal killer was removed entirely.
+The browser glue stays in one file (`solve.ts`); only the pure, easily-mistaken
+logic is split out. The XOR cipher and the step-30 off-by-one index math are the
+parts most likely to break silently, so they live in `session.ts` where they're
+covered by unit tests instead of only being exercised against a live website.
+An earlier version inlined the crypto inside `page.evaluate`; it was moved to
+Node so the tests and the solver run the exact same code path.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data flow.
 
 ## Typical Run
 
