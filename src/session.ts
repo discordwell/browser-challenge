@@ -13,6 +13,9 @@
 /** Key used by the challenge for the repeating-key XOR cipher. */
 export const XOR_KEY = "WO_2024_CHALLENGE";
 
+/** Number of steps in the challenge, and the number of codes it generates. */
+export const STEP_COUNT = 30;
+
 /**
  * Value submitted for step 30. The app's off-by-one validation looks up a 31st
  * code that the challenge never generates; appending this sentinel gives us
@@ -52,9 +55,19 @@ export function decryptSession(raw: string, key: string = XOR_KEY): SessionData 
   return JSON.parse(json) as SessionData;
 }
 
-/** Inverse of {@link decryptSession}: JSON → XOR → Base64. */
+/**
+ * Inverse of {@link decryptSession}: JSON → XOR → Base64.
+ *
+ * Characters above U+00FF are written as `\uXXXX` escapes: JSON.parse reads
+ * them identically, but left literal they would survive the all-ASCII XOR key
+ * with high bits set and make `btoa` throw. Latin-1 stays literal so output is
+ * byte-identical to the app's own encoding for the data it actually stores.
+ */
 export function encryptSession(data: SessionData, key: string = XOR_KEY): string {
-  const json = JSON.stringify(data);
+  const json = JSON.stringify(data).replace(
+    /[Ā-￿]/g,
+    (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
+  );
   const xored = xorCipher(json, key);
   return btoa(xored);
 }
@@ -69,7 +82,13 @@ export function encryptSession(data: SessionData, key: string = XOR_KEY): string
  * `codes[step]` — the code "belonging" to the *next* step.
  */
 export function codeForStep(codes: readonly string[], step: number): string {
-  return codes[step];
+  const code = codes[step];
+  if (code === undefined) {
+    throw new RangeError(
+      `No code available for step ${step} (have ${codes.length} codes)`,
+    );
+  }
+  return code;
 }
 
 /**
@@ -85,4 +104,44 @@ export function withStep30Sentinel(
   sentinel: string = SENTINEL_CODE,
 ): SessionData {
   return { ...data, codes: [...data.codes, sentinel] };
+}
+
+/**
+ * Single entry point used by the solver: decrypt the raw `wo_session` blob,
+ * verify it has the shape the rest of the run depends on (exactly
+ * {@link STEP_COUNT} codes — the step loop and the `Map.prototype.get` patch
+ * both assume it), and append the step-30 sentinel.
+ *
+ * Failing here turns a challenge-format change into one clear error instead of
+ * thirty confusing per-step failures from submitting `undefined`.
+ */
+export function prepareSession(raw: string, key: string = XOR_KEY): SessionData {
+  let data: unknown;
+  try {
+    data = decryptSession(raw, key);
+  } catch (cause) {
+    throw new Error(
+      `Could not decode wo_session (wrong XOR key or encoding change?): ${cause}`,
+    );
+  }
+
+  const codes =
+    data !== null && typeof data === "object"
+      ? (data as SessionData).codes
+      : undefined;
+  if (
+    !Array.isArray(codes) ||
+    codes.length !== STEP_COUNT ||
+    !codes.every((c) => typeof c === "string")
+  ) {
+    const got = !Array.isArray(codes)
+      ? `codes of type ${codes === null ? "null" : typeof codes}`
+      : codes.length !== STEP_COUNT
+        ? `${codes.length} codes`
+        : "non-string code entries";
+    throw new Error(
+      `Expected ${STEP_COUNT} string codes in wo_session, got ${got} — challenge format changed?`,
+    );
+  }
+  return withStep30Sentinel(data as SessionData);
 }

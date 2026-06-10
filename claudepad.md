@@ -1,5 +1,13 @@
 # Session Summaries
 
+## 2026-06-10T09:55 UTC - Hardening pass (post-review fixes) + CI
+- **Challenge site is DEAD**: https://serene-frangipane-7fd25b.netlify.app returns HTTP 404 (curl-verified). Solver now fails fast on non-2xx goto responses (reporting `response.url()` after redirects) instead of a confusing waitForSelector timeout. README notes the status.
+- Truthful outcomes: verdict is `/finish/` final-URL ground truth (FINISH_PATTERN shared with the loop), non-zero exit on failure, `process.exitCode` instead of `process.exit(1)` (review-verified: exit(1) truncates piped stderr at 64KiB; exitCode exits cleanly <1s after browser close). Browser closed via try/finally with `.catch(() => {})` so close failures never mask root errors. Headless runs skip the 5s showcase wait.
+- Fixed real `encryptSession` bug (review-confirmed): btoa threw DOMException on any char > U+00FF, so a session that decrypted fine could fail to re-encrypt. Now escapes ≥U+0100 as \uXXXX (Latin-1 stays literal → byte-identical output for the data the app actually stores; KNOWN_BLOB vector still pins this).
+- `prepareSession` hardened: wraps decode failures contextually, rejects non-object sessions and non-string code entries; `codeForStep` throws RangeError on missing index; tsconfig gains `noUncheckedIndexedAccess`. 17 unit tests, all green.
+- Added `.github/workflows/ci.yml` (Node 24, npm ci + typecheck + test; no Playwright browsers needed).
+- Ran /code-review (max effort, 9 finder angles + verify + sweep). Deliberately NOT fixed: unanchored stepN regexes (prefix collisions unreachable in the sequential flow; can't wet-test changes with the site dead), Map-patch `!this.has()` refinement, early-abort on cascade failures, integration test of the exit-code contract (needs a mock challenge app — future work if site is redeployed).
+
 ## 2026-06-10T08:28 UTC - Testability refactor
 - Extracted the XOR cipher + step-30 index math out of `page.evaluate` into a pure, typed `src/session.ts` (decryptSession/encryptSession/xorCipher/codeForStep/withStep30Sentinel).
 - Added `test/session.test.ts` (node:test, 9 tests). Includes an exact-bytes vector captured from the ORIGINAL inline algorithm so the refactor is provably behavior-preserving. `npm test`.
@@ -33,3 +41,9 @@
 - Key: `wo_session`, XOR key: `"WO_2024_CHALLENGE"`
 - All 30 codes available from the moment the challenge starts
 - No need to actually solve any puzzle - just decrypt and submit
+
+## Deployment Status (2026-06-10)
+The Netlify deployment returns HTTP 404 — the challenge site is gone. The solver
+can no longer be wet-tested end-to-end; only the pure logic (session.ts) is
+covered by tests, plus targeted Chromium checks of in-page snippets. If the
+challenge is redeployed, set `CHALLENGE_URL` and re-run `npm run solve`.

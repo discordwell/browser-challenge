@@ -1,11 +1,11 @@
-import { chromium } from "playwright";
+import { chromium, type Browser } from "playwright";
 
 import {
-  decryptSession,
   encryptSession,
-  withStep30Sentinel,
+  prepareSession,
   codeForStep,
   SENTINEL_CODE,
+  STEP_COUNT,
 } from "./session.ts";
 
 /** Challenge URL. Override with the CHALLENGE_URL env var. */
@@ -15,11 +15,23 @@ const CHALLENGE_URL =
 /** Run headless with HEADLESS=1; defaults to headed, as the challenge expects. */
 const HEADLESS = /^(1|true)$/i.test(process.env.HEADLESS ?? "");
 
+/** Terminal route — reaching it is the ground truth that the run succeeded. */
+const FINISH_PATTERN = /finish/;
+
 async function main() {
   const totalStart = performance.now();
   console.log("Launching browser...");
 
   const browser = await chromium.launch({ headless: HEADLESS });
+  try {
+    await solveAll(browser, totalStart);
+  } finally {
+    // Swallow close failures so they never mask the error that got us here.
+    await browser.close().catch(() => {});
+  }
+}
+
+async function solveAll(browser: Browser, totalStart: number) {
   const context = await browser.newContext();
   const page = await context.newPage();
 
@@ -90,7 +102,17 @@ async function main() {
   });
 
   console.log("Navigating to challenge...");
-  await page.goto(CHALLENGE_URL, { waitUntil: "domcontentloaded" });
+  const response = await page.goto(CHALLENGE_URL, {
+    waitUntil: "domcontentloaded",
+  });
+  if (response && !response.ok()) {
+    // response.url() rather than CHALLENGE_URL: after redirects the status
+    // belongs to the final URL, which is the one worth debugging.
+    throw new Error(
+      `Challenge site returned HTTP ${response.status()} for ${response.url()} — ` +
+        `set CHALLENGE_URL to a live deployment of the challenge.`
+    );
+  }
 
   // Click START button - wait for it to appear rather than fixed timeout
   console.log("Clicking START...");
@@ -107,16 +129,15 @@ async function main() {
   await page.waitForURL(/step1/, { timeout: 10000 });
   console.log("On step 1. Decrypting session...");
 
-  // Read the raw blob from the browser, then decrypt / prepare / re-encrypt in
-  // Node with the tested helpers in session.ts. We append a sentinel so step 30
-  // has a value to submit (see withStep30Sentinel) and write the blob back so
-  // sessionStorage stays internally consistent.
+  // Read the raw blob from the browser; prepareSession (Node, tested) validates
+  // it and appends the step-30 sentinel. Write the blob back so sessionStorage
+  // stays internally consistent.
   const rawSession = await page.evaluate(() =>
     sessionStorage.getItem("wo_session")
   );
   if (!rawSession) throw new Error("No session data found (wo_session)");
 
-  const data = withStep30Sentinel(decryptSession(rawSession));
+  const data = prepareSession(rawSession);
   const reencrypted = encryptSession(data);
   await page.evaluate(
     (blob) => sessionStorage.setItem("wo_session", blob),
@@ -129,17 +150,22 @@ async function main() {
   // Monkey-patch Map.prototype.get for step 30: validateCode(30) checks
   // codes.get(31), which doesn't exist. Return the sentinel for key 31 on maps
   // with exactly 30 entries (the challenge's code map). The sentinel matches the
-  // one withStep30Sentinel appended above, so the submitted code validates.
-  await page.evaluate((sentinel) => {
-    const originalGet = Map.prototype.get;
-    Map.prototype.get = function (key: any) {
-      if (key === 31 && this.size === 30) return sentinel;
-      return originalGet.call(this, key);
-    };
-  }, SENTINEL_CODE);
+  // one prepareSession appended above, so the submitted code validates.
+  await page.evaluate(
+    ({ sentinel, stepCount }) => {
+      const originalGet = Map.prototype.get;
+      const sentinelKey = stepCount + 1;
+      Map.prototype.get = function (key: any) {
+        if (key === sentinelKey && this.size === stepCount) return sentinel;
+        return originalGet.call(this, key);
+      };
+    },
+    { sentinel: SENTINEL_CODE, stepCount: STEP_COUNT }
+  );
 
   // Solve all 30 steps
-  for (let step = 1; step <= 30; step++) {
+  const failedSteps: number[] = [];
+  for (let step = 1; step <= STEP_COUNT; step++) {
     const stepStart = performance.now();
     // The correct submission for step N is codes[N] — see codeForStep in session.ts.
     const code = codeForStep(codes, step);
@@ -170,13 +196,14 @@ async function main() {
         !err.message?.includes("Execution context") &&
         !err.message?.includes("navigation")
       ) {
-        console.error(`  Step ${step} error: ${err.message.substring(0, 80)}`);
+        const msg = err?.message ?? String(err);
+        console.error(`  Step ${step} error: ${msg.substring(0, 80)}`);
       }
     }
 
     // Wait for navigation to next step
     const nextPattern =
-      step < 30 ? new RegExp(`step${step + 1}`) : /finish/;
+      step < STEP_COUNT ? new RegExp(`step${step + 1}`) : FINISH_PATTERN;
     try {
       await page.waitForURL(nextPattern, { timeout: 3000 });
     } catch {
@@ -192,12 +219,12 @@ async function main() {
           if (
             !retryErr.message?.match(/detached|Execution context|navigation/)
           ) {
-            console.warn(
-              `  Step ${step} retry: ${retryErr.message?.substring(0, 80)}`
-            );
+            const msg = retryErr?.message ?? String(retryErr);
+            console.warn(`  Step ${step} retry: ${msg.substring(0, 80)}`);
           }
         }
         if (!nextPattern.test(page.url())) {
+          failedSteps.push(step);
           console.error(`  Step ${step}: FAILED at ${page.url()}`);
         }
       }
@@ -208,15 +235,28 @@ async function main() {
   }
 
   const totalTime = ((performance.now() - totalStart) / 1000).toFixed(2);
-  console.log(`\n=== COMPLETE ===`);
+
+  // The finish page is only reachable by passing every step, so the final URL
+  // is the ground truth for success. failedSteps is diagnostic detail (a step
+  // recorded there may still have navigated just after its timeout).
+  const finished = FINISH_PATTERN.test(page.url());
+  console.log(`\n=== ${finished ? "COMPLETE" : "FAILED"} ===`);
+  if (!finished) {
+    if (failedSteps.length > 0) {
+      console.error(`Steps that never confirmed: ${failedSteps.join(", ")}`);
+    }
+    process.exitCode = 1;
+  }
   console.log(`Total time: ${totalTime}s`);
   console.log(`Final URL: ${page.url()}`);
 
-  await page.waitForTimeout(5000);
-  await browser.close();
+  // Leave the finish page visible briefly for a human watching a headed run.
+  if (!HEADLESS) await page.waitForTimeout(5000);
 }
 
 main().catch((err) => {
   console.error("Fatal:", err);
-  process.exit(1);
+  // exitCode (not process.exit) so piped stderr flushes fully; the browser is
+  // already closed by main's finally, so the event loop drains promptly.
+  process.exitCode = 1;
 });

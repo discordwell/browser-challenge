@@ -4,11 +4,13 @@ import assert from "node:assert/strict";
 import {
   XOR_KEY,
   SENTINEL_CODE,
+  STEP_COUNT,
   xorCipher,
   decryptSession,
   encryptSession,
   codeForStep,
   withStep30Sentinel,
+  prepareSession,
   type SessionData,
 } from "../src/session.ts";
 
@@ -52,6 +54,18 @@ test("decrypt/encrypt round-trips a realistic session", () => {
   assert.deepEqual(decryptSession(encryptSession(data)), data);
 });
 
+test("encryptSession handles non-Latin-1 characters (btoa would otherwise throw)", () => {
+  const data: SessionData = {
+    sessionId: "arrow → emoji 😀 Ā",
+    codes: ["ünïcödé-ÿ", "→CODE←"],
+  };
+  // Must not throw, and must round-trip exactly (escapes parse back to the
+  // same characters). Latin-1 like ÿ/ü stays literal, so ASCII/Latin-1-only
+  // sessions still encode byte-identically to the app's own algorithm — the
+  // KNOWN_BLOB test above pins that.
+  assert.deepEqual(decryptSession(encryptSession(data)), data);
+});
+
 test("codeForStep encodes the off-by-one: step N submits codes[N]", () => {
   // codes[0] belongs to step 1 but is never submitted (the app wants the *next*
   // code); step 1 submits codes[1], step 29 submits codes[29], etc.
@@ -79,6 +93,70 @@ test("withStep30Sentinel does not mutate the input and preserves other fields", 
   assert.equal(prepared.sessionId, "s");
   assert.deepEqual(prepared.completed, [1]);
   assert.notEqual(prepared.codes, data.codes, "should be a fresh array, not aliased");
+});
+
+test("codeForStep throws a clear error when the step has no code", () => {
+  const codes = ["c0", "c1"];
+  assert.throws(() => codeForStep(codes, 2), RangeError);
+  assert.throws(() => codeForStep(codes, 30), /No code available for step 30/);
+});
+
+test("prepareSession decrypts, validates, and appends the sentinel", () => {
+  const data: SessionData = {
+    sessionId: "live-ish",
+    codes: Array.from({ length: STEP_COUNT }, (_, i) => `CODE${i}`),
+    completed: [],
+  };
+  const prepared = prepareSession(encryptSession(data));
+
+  assert.equal(prepared.codes.length, STEP_COUNT + 1);
+  assert.equal(prepared.codes[STEP_COUNT], SENTINEL_CODE);
+  assert.equal(prepared.sessionId, "live-ish");
+  // Every step 1..STEP_COUNT now has a submittable code.
+  for (let step = 1; step <= STEP_COUNT; step++) {
+    assert.equal(typeof codeForStep(prepared.codes, step), "string");
+  }
+});
+
+test("prepareSession rejects a session with the wrong number of codes", () => {
+  const short: SessionData = { codes: ["only", "two"] };
+  assert.throws(
+    () => prepareSession(encryptSession(short)),
+    new RegExp(`Expected ${STEP_COUNT} string codes in wo_session, got 2 codes`),
+  );
+});
+
+test("prepareSession rejects a session where codes is not an array", () => {
+  const bogus = { codes: "nope" } as unknown as SessionData;
+  assert.throws(
+    () => prepareSession(encryptSession(bogus)),
+    /codes of type string/,
+  );
+});
+
+test("prepareSession rejects non-object sessions with the clear error, not a TypeError", () => {
+  const blobOfNull = encryptSession(null as unknown as SessionData);
+  assert.throws(() => prepareSession(blobOfNull), /challenge format changed\?/);
+});
+
+test("prepareSession rejects codes containing non-strings", () => {
+  const numeric = {
+    codes: Array.from({ length: STEP_COUNT }, (_, i) => i),
+  } as unknown as SessionData;
+  assert.throws(
+    () => prepareSession(encryptSession(numeric)),
+    /non-string code entries/,
+  );
+});
+
+test("prepareSession wraps decode failures in a contextual error", () => {
+  // Not valid Base64 at all → atob throws inside decryptSession.
+  assert.throws(() => prepareSession("!!!"), /Could not decode wo_session/);
+  // Valid Base64 of garbage → JSON.parse throws after XOR.
+  assert.throws(
+    () => prepareSession(btoa("garbage")),
+    /Could not decode wo_session/,
+  );
 });
 
 test("the prepared session still round-trips through the cipher", () => {

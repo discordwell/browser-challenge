@@ -2,6 +2,10 @@
 
 Solves all 30 steps of the [Browser Navigation Challenge](https://serene-frangipane-7fd25b.netlify.app) in under 25 seconds using Playwright.
 
+> **Status (June 2026):** the original Netlify deployment currently returns
+> HTTP 404. The solver detects this and fails fast with a clear error; point
+> `CHALLENGE_URL` at a live deployment of the challenge to run it.
+
 ## Quick Start
 
 ```bash
@@ -15,12 +19,19 @@ Override the target or run headless with env vars:
 CHALLENGE_URL=https://example.com HEADLESS=1 npm run solve
 ```
 
+The process exits non-zero if the run does not end on the finish page, so it
+can be scripted/CI'd.
+
 ### Development
 
 ```bash
 npm test         # unit tests for the session crypto / index logic
 npm run typecheck   # tsc --noEmit over src/ and test/
 ```
+
+Both run in CI on pushes to `main` and on pull requests
+(`.github/workflows/ci.yml`); the unit tests are pure Node and need no
+Playwright browsers.
 
 ## How It Works
 

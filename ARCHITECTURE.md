@@ -27,7 +27,9 @@ so no puzzle ever needs to be solved. Three things make a full run possible:
 
 1. **Code extraction.** `wo_session` is `JSON → repeating-key XOR (key
    "WO_2024_CHALLENGE") → Base64`. `solve.ts` reads the raw blob out of the
-   browser and decrypts it in Node via `decryptSession`.
+   browser and decrypts it in Node via `prepareSession`, which also validates
+   that exactly 30 codes came back (one clear error beats thirty confusing
+   per-step failures if the challenge format ever changes).
 
 2. **React fiber dispatch.** The code input is a React controlled component, so
    `input.value = ...` is ignored. `solve.ts` walks the fiber tree from the
@@ -48,15 +50,21 @@ so no puzzle ever needs to be solved. Three things make a full run possible:
 ## Data flow
 
 ```
+goto CHALLENGE_URL (fail fast on non-2xx response)
 START click → /step1
   page.evaluate: read sessionStorage["wo_session"]   (browser → Node)
-  decryptSession → withStep30Sentinel → encryptSession   (Node, tested)
-  page.evaluate: write sessionStorage["wo_session"]  (Node → browser)
+  prepareSession = decrypt + validate 30 codes + sentinel   (Node, tested)
+  encryptSession → page.evaluate: write it back     (Node → browser)
   page.evaluate: patch Map.prototype.get             (browser)
-  for step 1..30:
+  for step 1..STEP_COUNT:
     wait for input → __dispatchAndSubmit(codeForStep(codes, step)) → wait for next URL
 → /finish
 ```
+
+The finish page is only reachable by passing every step, so the final URL is
+the ground truth for success: the process exits non-zero if the run does not
+end on `/finish` (or if anything throws — the browser is closed via
+`try/finally` either way).
 
 The cipher runs in Node (not the browser) specifically so it is the same code
 path the unit tests exercise. The browser is used only to read and write the raw
