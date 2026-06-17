@@ -103,15 +103,15 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   fails the run instead of being masked by the valueTracker fallback. The
   session encoding is implemented independently in the mock (not imported from
   `session.ts`) so the solver's crypto is checked against a second
-  implementation rather than against itself. Two test-only knobs, read once
+  implementation rather than against itself. Three test-only knobs, read once
   from the initial page URL's query string (the solver navigates by pushState
   afterwards, so the query is captured at module load), let a test opt into a
   failure mode without disturbing the default happy path: `?codes=N` generates
-  a different number of codes, and `?flaky=N` makes step N swallow its first
-  submit.
+  a different number of codes, `?flaky=N` makes step N swallow its first
+  submit, and `?broken=N` makes step N reject every code.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract over four scenarios:
+  observable contract over five scenarios:
   - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
   - the site gone (404) — exit 1 with the fail-fast goto message;
   - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
@@ -122,6 +122,14 @@ The original deployment is gone (HTTP 404 since mid-2026), so
     `waitForURL` timeout) so the test can't pass without the retry actually
     firing. Step 20 is "strict", so the retry exercises the fiber dispatch, not
     the fallback.
+  - a genuinely unpassable step (`?broken=30`) — the step loop drives to a real
+    `FAILED`: exit 1, `=== FAILED ===`, "Steps that never confirmed: 30", and
+    *no* false `=== COMPLETE ===`, pinning the "final URL is the ground truth"
+    contract end-to-end (the other failure tests fail *before* the loop). It
+    also asserts the FAILED line reports the code was "set via React fiber" —
+    step 30 is strict, so this proves the failure is the site rejecting a set
+    code, not the solver failing to set the input. That is the distinction
+    `describeDispatch` exists to surface when the challenge is redeployed.
 - The mock app is plain-JS `React.createElement` served with React 18 UMD
   builds straight from `node_modules` (React 19 dropped UMD), so there is no
   bundler in the loop. The puzzles, modals, and distractors of the real

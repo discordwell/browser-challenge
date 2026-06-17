@@ -43,16 +43,23 @@ async function solveAll(browser: Browser, totalStart: number) {
     // esbuild __name helper (tsx adds it to compiled evaluate functions)
     (window as any).__name = (fn: any, _n: string) => fn;
 
-    // Shared helper: dispatch a code via React fiber and submit the form.
-    // Returns "ok", "no_input", or "no_form".
+    // Shared helper: set the code input via React fiber (or a valueTracker
+    // fallback) and submit the form. Returns a structured result reporting *how*
+    // the value was set ({ ok, method } / { ok, reason, method }), so a stuck
+    // step can distinguish "the site rejected the code" from "we never managed
+    // to set the input at all" — the first thing worth knowing when the
+    // challenge is redeployed and a step won't pass. See DispatchResult below.
     (window as any).__dispatchAndSubmit = async (code: string) => {
       const inp = document.querySelector(
         'input[placeholder*="code"], input[placeholder*="Code"]'
       ) as HTMLInputElement | null;
-      if (!inp) return "no_input";
+      if (!inp) return { ok: false, reason: "no code input found", method: "none" };
 
-      // Walk React fiber tree to find the string state dispatcher
-      let dispatched = false;
+      // Primary: walk the React fiber tree from the input to the nearest
+      // string-typed useState and call its dispatcher directly. A controlled
+      // input ignores `input.value = ...`, so on the challenge's strict steps
+      // this is the only thing that sets the value.
+      let method = "none";
       const fk = Object.keys(inp).find((k) => k.startsWith("__reactFiber"));
       if (fk) {
         let cur = (inp as any)[fk];
@@ -65,19 +72,21 @@ async function solveAll(browser: Browser, totalStart: number) {
                 s.queue?.dispatch
               ) {
                 s.queue.dispatch(code);
-                dispatched = true;
+                method = "fiber";
                 break;
               }
               s = s.next;
             }
-            if (dispatched) break;
+            if (method === "fiber") break;
           }
           cur = cur.return;
         }
       }
 
-      // Fallback: valueTracker trick for non-fiber inputs
-      if (!dispatched) {
+      // Fallback: the valueTracker trick, for an input that exposes no fiber
+      // string state. (Ineffective on inputs that ignore synthetic events, but
+      // harmless to attempt — those only ever pass via the fiber path above.)
+      if (method === "none") {
         const setter = Object.getOwnPropertyDescriptor(
           HTMLInputElement.prototype,
           "value"
@@ -87,6 +96,7 @@ async function solveAll(browser: Browser, totalStart: number) {
           if ((inp as any)._valueTracker) (inp as any)._valueTracker.setValue("");
           inp.dispatchEvent(new Event("input", { bubbles: true }));
           inp.dispatchEvent(new Event("change", { bubbles: true }));
+          method = "fallback";
         }
       }
 
@@ -95,12 +105,12 @@ async function solveAll(browser: Browser, totalStart: number) {
 
       // Submit via native form event (React intercepts this)
       const form = document.querySelector("form");
-      if (!form) return "no_form";
+      if (!form) return { ok: false, reason: "no form to submit", method };
       form.dispatchEvent(
         new Event("submit", { bubbles: true, cancelable: true })
       );
 
-      return "ok";
+      return { ok: true, method };
     };
   });
 
@@ -212,7 +222,10 @@ async function solveAll(browser: Browser, totalStart: number) {
  * An unconfirmed step is not necessarily a failed one — it may have navigated
  * just after the timeout — so the caller only treats the final URL as ground
  * truth (see solveAll). Errors that mean "the page navigated" are expected on
- * a successful submit and are not logged.
+ * a successful submit and are not logged. When a step does stay stuck, the
+ * FAILED log reports how the input was set (see {@link describeDispatch}) so a
+ * redeploy that broke the dispatch is told apart from one that just changed the
+ * codes.
  */
 async function submitStep(
   page: Page,
@@ -230,29 +243,17 @@ async function submitStep(
     await page.waitForTimeout(200);
   }
 
-  // Dispatch the code and submit.
-  try {
-    const result = await page.evaluate(
-      (code) => (window as any).__dispatchAndSubmit(code),
-      code
-    );
-    if (result !== "ok") console.error(`  Step ${step}: ${result}`);
-  } catch (err) {
-    if (!isNavigationError(err)) {
-      console.error(`  Step ${step} error: ${truncate(errorMessage(err))}`);
-    }
-  }
+  // Dispatch the code and submit. Keep the last result so a step that never
+  // advances can report how (or whether) the input was set — see the FAILED log.
+  let lastResult = await dispatchOnce(page, step, code);
 
   // Wait for navigation; retry the dispatch once if the URL hasn't advanced.
   try {
     await page.waitForURL(nextPattern, { timeout: 3000 });
   } catch {
     if (nextPattern.test(page.url())) return true;
+    lastResult = await dispatchOnce(page, step, code);
     try {
-      await page.evaluate(
-        (code) => (window as any).__dispatchAndSubmit(code),
-        code
-      );
       await page.waitForURL(nextPattern, { timeout: 3000 });
     } catch (retryErr) {
       if (!isNavigationError(retryErr)) {
@@ -260,11 +261,72 @@ async function submitStep(
       }
     }
     if (!nextPattern.test(page.url())) {
-      console.error(`  Step ${step}: FAILED at ${page.url()}`);
+      console.error(
+        `  Step ${step}: FAILED at ${page.url()} — ${describeDispatch(lastResult)}`
+      );
       return false;
     }
   }
   return true;
+}
+
+/** How `__dispatchAndSubmit` set the input value, for the failure diagnostic. */
+type SetMethod = "fiber" | "fallback" | "none";
+
+/**
+ * Structured result of one `__dispatchAndSubmit` call, mirroring the helper
+ * injected via `addInitScript`. `ok` means the form was submitted; `method`
+ * records whether the value reached React via the fiber dispatch, the
+ * valueTracker fallback, or neither.
+ */
+type DispatchResult =
+  | { ok: true; method: SetMethod }
+  | { ok: false; reason: string; method: SetMethod };
+
+/**
+ * Run `__dispatchAndSubmit` in the page and report what it did. Errors that
+ * mean "the page navigated" are expected on a successful submit (the execution
+ * context is destroyed mid-evaluate) and are swallowed; anything else is
+ * logged. Returns the dispatch result, or undefined if the call threw — it
+ * feeds only the failure diagnostic, since the next URL is the success signal.
+ */
+async function dispatchOnce(
+  page: Page,
+  step: number,
+  code: string
+): Promise<DispatchResult | undefined> {
+  try {
+    const result = (await page.evaluate(
+      (code) => (window as any).__dispatchAndSubmit(code),
+      code
+    )) as DispatchResult;
+    if (!result.ok) console.error(`  Step ${step}: ${result.reason}`);
+    return result;
+  } catch (err) {
+    if (!isNavigationError(err)) {
+      console.error(`  Step ${step} error: ${truncate(errorMessage(err))}`);
+    }
+    return undefined;
+  }
+}
+
+/**
+ * One-line summary of a dispatch result for the FAILED log. The point is to
+ * separate "the code was set but the site rejected it" (a format/code change)
+ * from "we never managed to set the input" (the fiber walk or fallback needs
+ * updating) — the key question when a step gets stuck on a redeployed challenge.
+ */
+function describeDispatch(result: DispatchResult | undefined): string {
+  if (!result) return "dispatch threw (navigation?)";
+  if (!result.ok) return result.reason;
+  switch (result.method) {
+    case "fiber":
+      return "code set via React fiber dispatch";
+    case "fallback":
+      return "code set via valueTracker fallback";
+    default:
+      return "code could NOT be set (no fiber state, no fallback)";
+  }
 }
 
 /** Best-effort message for logging an unknown thrown value. */

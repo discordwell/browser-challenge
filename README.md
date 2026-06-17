@@ -38,9 +38,11 @@ sessionStorage encryption, the same `validateCode` off-by-one, and steps 19+
 ignoring synthetic input events as the original site did — then runs the
 actual solver CLI against it and asserts the exit-code contract. It covers a
 clean 30-step run, the fail-fast on a dead site (404), the fail-fast on a
-malformed session (one clear error, not thirty per-step failures), and
-recovery via the retry path when a step drops its first submit. It needs the
-Playwright Chromium build (`npx playwright install chromium`).
+malformed session (one clear error, not thirty per-step failures), recovery
+via the retry path when a step drops its first submit, and a genuinely
+unpassable step — the run reports it as `FAILED`, lists it under "Steps that
+never confirmed", and exits non-zero rather than printing a false `COMPLETE`.
+It needs the Playwright Chromium build (`npx playwright install chromium`).
 
 Everything runs in CI on pushes to `main` and on pull requests
 (`.github/workflows/ci.yml`); the unit-test job is pure Node and needs no

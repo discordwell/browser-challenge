@@ -156,3 +156,38 @@ test(
     }
   },
 );
+
+test(
+  "solver reports a genuine step failure honestly (FAILED + exit 1, never a false COMPLETE)",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?broken=30 makes step 30 reject every code — a step the solver cannot
+      // pass, as if the challenge changed so the extracted code no longer
+      // validates. Steps 1-29 still pass, isolating the failure to one step
+      // (and keeping the run to one stuck step's ~6s of retry timeouts). This
+      // pins the project's core "truthful outcomes" contract end-to-end: when
+      // the run does not reach /finish it must say so and exit non-zero, never
+      // a false COMPLETE. The other failure tests fail *before* the step loop
+      // (404, malformed session); this is the only one that drives the loop to
+      // a genuine FAILED.
+      const run = await runSolver(`${mock.url}/?broken=30`);
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 1, `expected exit code 1${detail}`);
+      assert.match(run.stdout, /=== FAILED ===/, detail);
+      assert.doesNotMatch(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(run.stderr, /Step 30: FAILED/, detail);
+      assert.match(run.stderr, /Steps that never confirmed: 30/, detail);
+      // Teeth for the diagnostic: step 30 is strict (≥19), so the value can only
+      // have been set via the fiber dispatch. The FAILED line must say so —
+      // proving the failure is the site rejecting a set code, not the solver
+      // failing to set the input. That distinction is the whole point of
+      // surfacing the dispatch method on a redeployed challenge.
+      assert.match(run.stderr, /set via React fiber/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);

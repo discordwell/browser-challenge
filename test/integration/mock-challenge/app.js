@@ -43,6 +43,11 @@ const GEN_CODE_COUNT = Number(KNOBS.get("codes")) || STEP_COUNT;
 // transient flake so the solver's retry path (submitStep) is exercised. 0 = no
 // flaky step (the default).
 const FLAKY_STEP = Number(KNOBS.get("flaky")) || 0;
+// A step that rejects EVERY code, simulating a step the solver genuinely cannot
+// pass (e.g. the challenge format changed so the extracted code no longer
+// validates). Exercises the solver's failure path: the FAILED log, the "Steps
+// that never confirmed" summary, and a non-zero exit. 0 = no broken step.
+const BROKEN_STEP = Number(KNOBS.get("broken")) || 0;
 
 function xor(text) {
   let out = "";
@@ -154,6 +159,13 @@ function StepPage({ step, navigate }) {
     // before validateCode, so `error` never becomes a string and the fiber
     // walk on retry still finds `code` as the lone string state.
     if (step === FLAKY_STEP && (submits.current += 1) === 1) return;
+    // The broken step rejects every code, so the solver exhausts its retry and
+    // reports the step as FAILED. `code` is still hook #1, so the fiber walk on
+    // each attempt finds it before the now-string `error` state.
+    if (step === BROKEN_STEP) {
+      setError("Invalid code");
+      return;
+    }
     if (validateCode(step, code)) {
       navigate(step === STEP_COUNT ? "/finish" : "/step" + (step + 1));
     } else {
