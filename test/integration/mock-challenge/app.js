@@ -28,6 +28,22 @@
 const XOR_KEY = "WO_2024_CHALLENGE";
 const STEP_COUNT = 30;
 
+// Test-only knobs, read once from the *initial* page URL's query string. The
+// solver navigates via pushState after START, so the query is gone by step 1 —
+// we capture it here at module load. All knobs default to the original
+// behavior, so the happy-path integration test (which passes no query) is
+// unaffected; the other tests opt in to a specific failure mode.
+const KNOBS = new URLSearchParams(window.location.search);
+// How many codes to generate. Default STEP_COUNT (30). Generating a different
+// number (e.g. ?codes=29) simulates the challenge format changing: the solver's
+// prepareSession must reject it up front with one clear error rather than
+// letting the step loop submit `undefined` thirty times.
+const GEN_CODE_COUNT = Number(KNOBS.get("codes")) || STEP_COUNT;
+// A step that swallows its FIRST submit and accepts the second, simulating a
+// transient flake so the solver's retry path (submitStep) is exercised. 0 = no
+// flaky step (the default).
+const FLAKY_STEP = Number(KNOBS.get("flaky")) || 0;
+
 function xor(text) {
   let out = "";
   for (let i = 0; i < text.length; i++) {
@@ -49,7 +65,7 @@ let codesMap = null;
 
 function startChallenge() {
   const codes = Array.from(
-    { length: STEP_COUNT },
+    { length: GEN_CODE_COUNT },
     (_, i) => "WO-" + (i + 1) + "-" + Math.random().toString(36).slice(2, 8).toUpperCase(),
   );
   sessionStorage.setItem(
@@ -81,7 +97,7 @@ function validateCode(stepNum, code) {
 }
 
 const e = React.createElement;
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useRef } = React;
 
 function usePath() {
   const [path, setPath] = useState(window.location.pathname);
@@ -118,9 +134,11 @@ function StartPage({ navigate }) {
 function StepPage({ step, navigate }) {
   // The code state must be the first hook: the solver walks this component's
   // hook list from the input's fiber and dispatches into the first
-  // string-typed useState it finds.
+  // string-typed useState it finds. (`error` starts null and the submit ref
+  // holds an object, so neither is mistaken for the string code state.)
   const [code, setCode] = useState("");
   const [error, setError] = useState(null);
+  const submits = useRef(0);
 
   // On the original site, synthetic input events stopped working from step 19
   // on — the valueTracker fallback failed there and only a direct fiber state
@@ -131,6 +149,11 @@ function StepPage({ step, navigate }) {
 
   const onSubmit = (ev) => {
     ev.preventDefault();
+    // The flaky step swallows its first submit so only the solver's retry gets
+    // through — exercises submitStep's retry path. The first submit returns
+    // before validateCode, so `error` never becomes a string and the fiber
+    // walk on retry still finds `code` as the lone string state.
+    if (step === FLAKY_STEP && (submits.current += 1) === 1) return;
     if (validateCode(step, code)) {
       navigate(step === STEP_COUNT ? "/finish" : "/step" + (step + 1));
     } else {

@@ -103,11 +103,25 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   fails the run instead of being masked by the valueTracker fallback. The
   session encoding is implemented independently in the mock (not imported from
   `session.ts`) so the solver's crypto is checked against a second
-  implementation rather than against itself.
+  implementation rather than against itself. Two test-only knobs, read once
+  from the initial page URL's query string (the solver navigates by pushState
+  afterwards, so the query is captured at module load), let a test opt into a
+  failure mode without disturbing the default happy path: `?codes=N` generates
+  a different number of codes, and `?flaky=N` makes step N swallow its first
+  submit.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract: exit 0 + `=== COMPLETE ===` + final URL `/finish` on a
-  clean run, and exit 1 with the fail-fast message when the site answers 404.
+  observable contract over four scenarios:
+  - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
+  - the site gone (404) — exit 1 with the fail-fast goto message;
+  - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
+    "Expected 30 string codes" error and *no* per-step `FAILED` spam, pinning
+    the "one clear error, not thirty failures" contract end-to-end;
+  - a transient flake (`?flaky=20`) — the run still completes via `submitStep`'s
+    retry, asserted with a timing check (step 20 takes seconds, the retry's 3s
+    `waitForURL` timeout) so the test can't pass without the retry actually
+    firing. Step 20 is "strict", so the retry exercises the fiber dispatch, not
+    the fallback.
 - The mock app is plain-JS `React.createElement` served with React 18 UMD
   builds straight from `node_modules` (React 19 dropped UMD), so there is no
   bundler in the loop. The puzzles, modals, and distractors of the real

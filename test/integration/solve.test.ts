@@ -89,3 +89,70 @@ test(
     }
   },
 );
+
+test(
+  "solver fails fast with one clear error when the session has the wrong number of codes",
+  { timeout: 60_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?codes=29 makes the mock generate 29 codes instead of 30 — a stand-in
+      // for the challenge format changing. prepareSession must reject this up
+      // front with a single clear error rather than letting the step loop
+      // submit `undefined` thirty times. This pins the documented contract
+      // ("one clear error instead of thirty confusing per-step failures")
+      // end-to-end through the real CLI, not just at the function level.
+      const run = await runSolver(`${mock.url}/?codes=29`);
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 1, `expected exit code 1${detail}`);
+      assert.match(
+        run.stderr,
+        /Expected 30 string codes in wo_session, got 29 codes/,
+        detail,
+      );
+      assert.match(run.stderr, /challenge format changed/, detail);
+      // The whole point: one clear error, not a wall of per-step failures.
+      assert.doesNotMatch(run.stdout + run.stderr, /Step \d+: FAILED/, detail);
+      assert.doesNotMatch(run.stdout, /=== COMPLETE ===/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);
+
+test(
+  "solver recovers via its retry path when a step swallows the first submit",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?flaky=20 makes step 20 ignore its first submit and accept the second,
+      // simulating a transient flake. Step 20 is "strict" (ignores synthetic
+      // onChange), so the retry has to re-run the fiber dispatch, not the
+      // valueTracker fallback. submitStep's retry path is otherwise never hit
+      // by these tests — every other step passes on the first try. The run
+      // should still complete cleanly.
+      const run = await runSolver(`${mock.url}/?flaky=20`);
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 0, `expected exit code 0${detail}`);
+      assert.match(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(run.stdout, /Final URL: .*\/finish/, detail);
+      // The retry succeeds, so no step is ever reported as FAILED.
+      assert.doesNotMatch(run.stdout + run.stderr, /FAILED/, detail);
+      // Teeth: prove the retry actually fired rather than the run trivially
+      // completing. A normal step finishes in well under a second; step 20 can
+      // only have taken seconds because the first submit was swallowed and the
+      // solver waited out its 3s waitForURL timeout before retrying.
+      const step20 = run.stdout.match(/Step 20: (\d+\.\d+)s/);
+      assert.ok(step20, `expected a "Step 20" timing line${detail}`);
+      assert.ok(
+        Number(step20[1]) >= 1,
+        `step 20 should have taken seconds (retry timeout), got ${step20[1]}s${detail}`,
+      );
+    } finally {
+      await mock.close();
+    }
+  },
+);
