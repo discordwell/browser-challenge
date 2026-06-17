@@ -100,21 +100,26 @@ The initial working version completed all 30 steps in ~48 seconds. Here's what g
 
 ```
 src/
-  session.ts   # Pure logic: XOR cipher, decrypt/encrypt, code-for-step mapping. No browser.
-  solve.ts     # Orchestration: drives Chromium, dispatches into React, navigates steps.
+  session.ts      # Pure logic: XOR cipher, decrypt/encrypt, code-for-step mapping. No browser.
+  navigation.ts   # Pure logic: anchored step/finish URL patterns + "page navigated" error classifier.
+  solve.ts        # Orchestration: drives Chromium, dispatches into React, navigates steps.
 test/
-  session.test.ts   # Unit tests for session.ts (node:test)
+  session.test.ts      # Unit tests for session.ts (node:test)
+  navigation.test.ts   # Unit tests for navigation.ts (node:test)
   integration/
     solve.test.ts   # Runs the real solver CLI against the mock challenge
     mock-challenge/ # Local React 18 replica of the challenge's contract
 ```
 
 The browser glue stays in one file (`solve.ts`); only the pure, easily-mistaken
-logic is split out. The XOR cipher and the step-30 off-by-one index math are the
-parts most likely to break silently, so they live in `session.ts` where they're
-covered by unit tests instead of only being exercised against a live website.
-An earlier version inlined the crypto inside `page.evaluate`; it was moved to
-Node so the tests and the solver run the exact same code path.
+logic is split out. The XOR cipher and the step-30 off-by-one index math
+(`session.ts`), and the route matching (`navigation.ts`), are the parts most
+likely to break silently, so they live in pure modules where they're covered by
+unit tests instead of only being exercised against a live website. The step URL
+patterns are anchored — `/step2` won't match `/step20` — so a substring
+collision can't make the step loop think it advanced early. An earlier version
+inlined the crypto inside `page.evaluate`; it was moved to Node so the tests and
+the solver run the exact same code path.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data flow.
 

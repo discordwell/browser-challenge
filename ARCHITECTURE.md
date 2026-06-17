@@ -7,10 +7,12 @@ Challenge in ~23s by extracting the answer codes instead of solving the puzzles.
 
 ```
 src/
-  session.ts   # Pure logic: XOR cipher, decrypt/encrypt, code-for-step mapping. No browser, no I/O.
-  solve.ts     # Orchestration: drives Chromium via Playwright, calls into session.ts.
+  session.ts      # Pure logic: XOR cipher, decrypt/encrypt, code-for-step mapping. No browser, no I/O.
+  navigation.ts   # Pure logic: anchored step/finish URL patterns + "page navigated" error classifier.
+  solve.ts        # Orchestration: drives Chromium via Playwright, calls into session.ts + navigation.ts.
 test/
-  session.test.ts  # Unit tests for session.ts (node:test).
+  session.test.ts     # Unit tests for session.ts (node:test).
+  navigation.test.ts  # Unit tests for navigation.ts (node:test).
   integration/
     solve.test.ts      # End-to-end: spawns the real solver CLI, asserts the exit-code contract.
     mock-challenge/
@@ -19,12 +21,22 @@ test/
       server.ts        # node:http server: UMD from node_modules, SPA catch-all to index.html.
 ```
 
-`session.ts` holds everything that can be reasoned about and tested without a
-browser. `solve.ts` owns all the browser-specific glue (launching Chromium,
-clicking START, dispatching into React, navigating between steps). The split
-exists so the trickiest logic — the cipher and the off-by-one index math — is
-covered by fast, deterministic unit tests rather than only exercised against a
-live website.
+`session.ts` and `navigation.ts` hold everything that can be reasoned about and
+tested without a browser. `solve.ts` owns all the browser-specific glue
+(launching Chromium, clicking START, dispatching into React, navigating between
+steps). The split exists so the trickiest logic — the cipher, the off-by-one
+index math, and the route matching — is covered by fast, deterministic unit
+tests rather than only exercised against a live website.
+
+`navigation.ts` builds the URL patterns the step loop waits on. They are
+**anchored**: `stepPattern(2)` matches `/step2` but not `/step20`, so a
+substring collision can't make `waitForURL` report success one step early. It
+also classifies the Playwright errors that actually mean "the page navigated" —
+a success for this solver — from the context-destroyed/detached signals
+(`Execution context was destroyed …`, `frame got detached`), case-insensitively,
+in one place instead of two slightly different inline checks. It deliberately
+does *not* key on the bare word "navigation": a `waitForURL` timeout message
+contains it too but means the page did *not* advance, which must stay loggable.
 
 ## How the solve works
 

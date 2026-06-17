@@ -1,4 +1,4 @@
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 
 import {
   encryptSession,
@@ -7,6 +7,12 @@ import {
   SENTINEL_CODE,
   STEP_COUNT,
 } from "./session.ts";
+import {
+  FINISH_PATTERN,
+  isNavigationError,
+  nextRoutePattern,
+  stepPattern,
+} from "./navigation.ts";
 
 /** Challenge URL. Override with the CHALLENGE_URL env var. */
 const CHALLENGE_URL =
@@ -14,9 +20,6 @@ const CHALLENGE_URL =
 
 /** Run headless with HEADLESS=1; defaults to headed, as the challenge expects. */
 const HEADLESS = /^(1|true)$/i.test(process.env.HEADLESS ?? "");
-
-/** Terminal route — reaching it is the ground truth that the run succeeded. */
-const FINISH_PATTERN = /finish/;
 
 async function main() {
   const totalStart = performance.now();
@@ -126,7 +129,7 @@ async function solveAll(browser: Browser, totalStart: number) {
     await page.click("button", { timeout: 3000 });
   }
 
-  await page.waitForURL(/step1/, { timeout: 10000 });
+  await page.waitForURL(stepPattern(1), { timeout: 10000 });
   console.log("On step 1. Decrypting session...");
 
   // Read the raw blob from the browser; prepareSession (Node, tested) validates
@@ -169,66 +172,13 @@ async function solveAll(browser: Browser, totalStart: number) {
     const stepStart = performance.now();
     // The correct submission for step N is codes[N] — see codeForStep in session.ts.
     const code = codeForStep(codes, step);
-
-    // Wait for input to appear
-    try {
-      await page.waitForSelector(
-        'input[placeholder*="code"], input[placeholder*="Code"]',
-        { timeout: 2000, state: "attached" }
-      );
-    } catch {
-      await page.waitForTimeout(200);
-    }
-
-    // Dispatch code and submit
-    try {
-      const result = await page.evaluate(
-        (code) => (window as any).__dispatchAndSubmit(code),
-        code
-      );
-      if (result !== "ok") {
-        console.error(`  Step ${step}: ${result}`);
-      }
-    } catch (err: any) {
-      // "detached" / "Execution context" / "navigation" errors mean success
-      if (
-        !err.message?.includes("detached") &&
-        !err.message?.includes("Execution context") &&
-        !err.message?.includes("navigation")
-      ) {
-        const msg = err?.message ?? String(err);
-        console.error(`  Step ${step} error: ${msg.substring(0, 80)}`);
-      }
-    }
-
-    // Wait for navigation to next step
-    const nextPattern =
-      step < STEP_COUNT ? new RegExp(`step${step + 1}`) : FINISH_PATTERN;
-    try {
-      await page.waitForURL(nextPattern, { timeout: 3000 });
-    } catch {
-      if (!nextPattern.test(page.url())) {
-        // Retry once
-        try {
-          await page.evaluate(
-            (code) => (window as any).__dispatchAndSubmit(code),
-            code
-          );
-          await page.waitForURL(nextPattern, { timeout: 3000 });
-        } catch (retryErr: any) {
-          if (
-            !retryErr.message?.match(/detached|Execution context|navigation/)
-          ) {
-            const msg = retryErr?.message ?? String(retryErr);
-            console.warn(`  Step ${step} retry: ${msg.substring(0, 80)}`);
-          }
-        }
-        if (!nextPattern.test(page.url())) {
-          failedSteps.push(step);
-          console.error(`  Step ${step}: FAILED at ${page.url()}`);
-        }
-      }
-    }
+    const confirmed = await submitStep(
+      page,
+      step,
+      code,
+      nextRoutePattern(step, STEP_COUNT)
+    );
+    if (!confirmed) failedSteps.push(step);
 
     const elapsed = ((performance.now() - stepStart) / 1000).toFixed(2);
     console.log(`Step ${step}: ${elapsed}s → ${page.url().split("/").pop()}`);
@@ -252,6 +202,79 @@ async function solveAll(browser: Browser, totalStart: number) {
 
   // Leave the finish page visible briefly for a human watching a headed run.
   if (!HEADLESS) await page.waitForTimeout(5000);
+}
+
+/**
+ * Run a single step: wait for the code input, dispatch the code into React and
+ * submit, then wait for the URL to advance to `nextPattern`, retrying the
+ * dispatch once if it doesn't. Returns whether the navigation was confirmed.
+ *
+ * An unconfirmed step is not necessarily a failed one — it may have navigated
+ * just after the timeout — so the caller only treats the final URL as ground
+ * truth (see solveAll). Errors that mean "the page navigated" are expected on
+ * a successful submit and are not logged.
+ */
+async function submitStep(
+  page: Page,
+  step: number,
+  code: string,
+  nextPattern: RegExp
+): Promise<boolean> {
+  // Wait for the input to appear; a short fixed wait if the selector times out.
+  try {
+    await page.waitForSelector(
+      'input[placeholder*="code"], input[placeholder*="Code"]',
+      { timeout: 2000, state: "attached" }
+    );
+  } catch {
+    await page.waitForTimeout(200);
+  }
+
+  // Dispatch the code and submit.
+  try {
+    const result = await page.evaluate(
+      (code) => (window as any).__dispatchAndSubmit(code),
+      code
+    );
+    if (result !== "ok") console.error(`  Step ${step}: ${result}`);
+  } catch (err) {
+    if (!isNavigationError(err)) {
+      console.error(`  Step ${step} error: ${truncate(errorMessage(err))}`);
+    }
+  }
+
+  // Wait for navigation; retry the dispatch once if the URL hasn't advanced.
+  try {
+    await page.waitForURL(nextPattern, { timeout: 3000 });
+  } catch {
+    if (nextPattern.test(page.url())) return true;
+    try {
+      await page.evaluate(
+        (code) => (window as any).__dispatchAndSubmit(code),
+        code
+      );
+      await page.waitForURL(nextPattern, { timeout: 3000 });
+    } catch (retryErr) {
+      if (!isNavigationError(retryErr)) {
+        console.warn(`  Step ${step} retry: ${truncate(errorMessage(retryErr))}`);
+      }
+    }
+    if (!nextPattern.test(page.url())) {
+      console.error(`  Step ${step}: FAILED at ${page.url()}`);
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Best-effort message for logging an unknown thrown value. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Clip an error message so a stray stack/long line can't flood the log. */
+function truncate(text: string, max = 80): string {
+  return text.slice(0, max);
 }
 
 main().catch((err) => {
