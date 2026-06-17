@@ -11,6 +11,12 @@ src/
   solve.ts     # Orchestration: drives Chromium via Playwright, calls into session.ts.
 test/
   session.test.ts  # Unit tests for session.ts (node:test).
+  integration/
+    solve.test.ts      # End-to-end: spawns the real solver CLI, asserts the exit-code contract.
+    mock-challenge/
+      app.js           # React 18 replica of the challenge's contract (plain JS, no bundler).
+      index.html       # Shell that loads the React UMD builds + app.js.
+      server.ts        # node:http server: UMD from node_modules, SPA catch-all to index.html.
 ```
 
 `session.ts` holds everything that can be reasoned about and tested without a
@@ -70,13 +76,39 @@ The cipher runs in Node (not the browser) specifically so it is the same code
 path the unit tests exercise. The browser is used only to read and write the raw
 `wo_session` string.
 
+## Integration tests (the mock challenge)
+
+The original deployment is gone (HTTP 404 since mid-2026), so
+`test/integration/` keeps `solve.ts` executable and verified locally:
+
+- `mock-challenge/app.js` replicates exactly the contract the solver depends
+  on: `wo_session` written at START with the same JSON → XOR → Base64
+  encoding, pushState routing `/ → /step1 … /step30 → /finish`, a controlled
+  React input, and `validateCode`'s off-by-one (step N checks the code of step
+  N+1, so step 30 looks up a 31st code that doesn't exist). Steps 19+ ignore
+  synthetic input events, as the original site did — those steps are only
+  passable via the solver's fiber state dispatch, so a regression in that walk
+  fails the run instead of being masked by the valueTracker fallback. The
+  session encoding is implemented independently in the mock (not imported from
+  `session.ts`) so the solver's crypto is checked against a second
+  implementation rather than against itself.
+- `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
+  child process with `CHALLENGE_URL` pointed at the mock and asserts the
+  observable contract: exit 0 + `=== COMPLETE ===` + final URL `/finish` on a
+  clean run, and exit 1 with the fail-fast message when the site answers 404.
+- The mock app is plain-JS `React.createElement` served with React 18 UMD
+  builds straight from `node_modules` (React 19 dropped UMD), so there is no
+  bundler in the loop. The puzzles, modals, and distractors of the real
+  challenge are deliberately absent: the solver never interacted with them.
+
 ## Running
 
 ```bash
 npm install
-npm run solve        # run the solver (CHALLENGE_URL and HEADLESS env vars override defaults)
-npm test             # unit tests for session.ts
-npm run typecheck    # tsc --noEmit over src/ and test/
+npm run solve            # run the solver (CHALLENGE_URL and HEADLESS env vars override defaults)
+npm test                 # unit tests for session.ts
+npm run test:integration # solver CLI vs the local mock challenge (needs Chromium installed)
+npm run typecheck        # tsc --noEmit over src/ and test/
 ```
 
 `solve.ts` is executed with `tsx` (no build step). `tsc` is used only for type

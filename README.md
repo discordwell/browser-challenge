@@ -4,7 +4,9 @@ Solves all 30 steps of the [Browser Navigation Challenge](https://serene-frangip
 
 > **Status (June 2026):** the original Netlify deployment currently returns
 > HTTP 404. The solver detects this and fails fast with a clear error; point
-> `CHALLENGE_URL` at a live deployment of the challenge to run it.
+> `CHALLENGE_URL` at a live deployment of the challenge to run it. The solver
+> itself stays verifiable end-to-end against a local mock of the challenge —
+> see `npm run test:integration` below.
 
 ## Quick Start
 
@@ -25,13 +27,21 @@ can be scripted/CI'd.
 ### Development
 
 ```bash
-npm test         # unit tests for the session crypto / index logic
-npm run typecheck   # tsc --noEmit over src/ and test/
+npm test                 # unit tests for the session crypto / index logic
+npm run typecheck        # tsc --noEmit over src/ and test/
+npm run test:integration # the real solver CLI vs a local mock challenge
 ```
 
-Both run in CI on pushes to `main` and on pull requests
-(`.github/workflows/ci.yml`); the unit tests are pure Node and need no
-Playwright browsers.
+The integration suite spins up a local replica of the challenge
+(`test/integration/mock-challenge/`) — a real React 18 SPA with the same
+sessionStorage encryption, the same `validateCode` off-by-one, and steps 19+
+ignoring synthetic input events as the original site did — then runs the
+actual solver CLI against it and asserts the exit-code contract. It needs the
+Playwright Chromium build (`npx playwright install chromium`).
+
+Everything runs in CI on pushes to `main` and on pull requests
+(`.github/workflows/ci.yml`); the unit-test job is pure Node and needs no
+Playwright browsers, the integration job installs Chromium.
 
 ## How It Works
 
@@ -94,6 +104,9 @@ src/
   solve.ts     # Orchestration: drives Chromium, dispatches into React, navigates steps.
 test/
   session.test.ts   # Unit tests for session.ts (node:test)
+  integration/
+    solve.test.ts   # Runs the real solver CLI against the mock challenge
+    mock-challenge/ # Local React 18 replica of the challenge's contract
 ```
 
 The browser glue stays in one file (`solve.ts`); only the pure, easily-mistaken

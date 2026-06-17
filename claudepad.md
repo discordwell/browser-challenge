@@ -1,5 +1,14 @@
 # Session Summaries
 
+## 2026-06-11T UTC - Mock challenge + end-to-end integration tests
+- Built `test/integration/mock-challenge/`: a local React 18 replica of the challenge's contract (the flagged "needs a mock challenge app" future work). Same `wo_session` JSON→XOR→Base64 encoding (implemented independently from session.ts, so the solver's crypto is checked against a second implementation), pushState SPA routing, controlled input, `validateCode` off-by-one (step N checks code N+1; step 30 looks up nonexistent code 31). Steps 19+ ignore synthetic input events like the original site — only the fiber state dispatch passes them.
+- `test/integration/solve.test.ts` spawns the REAL CLI (`node --import tsx src/solve.ts`) as a child process: asserts exit 0 + COMPLETE + `/finish` + "Decrypted 31 codes" on a clean run, and exit 1 + fail-fast message against a 404 server. The exit-code contract is now tested end-to-end.
+- Verified the test has teeth: sabotaging the fiber walk (`__reactFiber` → `__sabotagedFiber`) makes the run stick at step 19 exactly as on the original site, and the test fails with the transcript. Steps 1–18 still pass via valueTracker fallback — faithful to documented reality.
+- Full solve vs localhost mock: 0.73s, all 30 steps ~10ms each (React flushes discrete submit events synchronously, so each step commits before `__dispatchAndSubmit` returns).
+- Mock is plain-JS React.createElement served by node:http (`server.ts`) with React 18 UMD straight from node_modules (React 19 dropped UMD; `exports` map blocks deep resolve — resolve `react/package.json` and join). No bundler. react/react-dom added as devDeps.
+- CI: new `integration` job (installs Chromium with ms-playwright cache keyed on Playwright version). Unit job stays browser-free. `npm run test:integration` script added; `npm test` glob unchanged (non-recursive, still unit-only).
+- README + ARCHITECTURE.md document the mock and the testing story.
+
 ## 2026-06-10T09:55 UTC - Hardening pass (post-review fixes) + CI
 - **Challenge site is DEAD**: https://serene-frangipane-7fd25b.netlify.app returns HTTP 404 (curl-verified). Solver now fails fast on non-2xx goto responses (reporting `response.url()` after redirects) instead of a confusing waitForSelector timeout. README notes the status.
 - Truthful outcomes: verdict is `/finish/` final-URL ground truth (FINISH_PATTERN shared with the loop), non-zero exit on failure, `process.exitCode` instead of `process.exit(1)` (review-verified: exit(1) truncates piped stderr at 64KiB; exitCode exits cleanly <1s after browser close). Browser closed via try/finally with `.catch(() => {})` so close failures never mask root errors. Headless runs skip the 5s showcase wait.
@@ -42,8 +51,10 @@
 - All 30 codes available from the moment the challenge starts
 - No need to actually solve any puzzle - just decrypt and submit
 
-## Deployment Status (2026-06-10)
-The Netlify deployment returns HTTP 404 — the challenge site is gone. The solver
-can no longer be wet-tested end-to-end; only the pure logic (session.ts) is
-covered by tests, plus targeted Chromium checks of in-page snippets. If the
+## Deployment Status (2026-06-10, updated 2026-06-11)
+The Netlify deployment returns HTTP 404 — the challenge site is gone. If the
 challenge is redeployed, set `CHALLENGE_URL` and re-run `npm run solve`.
+Since 2026-06-11 the solver IS wet-testable locally: `npm run test:integration`
+runs the real CLI against a React 18 mock of the challenge contract
+(`test/integration/mock-challenge/`), covering fiber dispatch, the Map patch,
+the step loop, and the exit codes.
