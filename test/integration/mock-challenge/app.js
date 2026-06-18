@@ -48,6 +48,22 @@ const FLAKY_STEP = Number(KNOBS.get("flaky")) || 0;
 // validates). Exercises the solver's failure path: the FAILED log, the "Steps
 // that never confirmed" summary, and a non-zero exit. 0 = no broken step.
 const BROKEN_STEP = Number(KNOBS.get("broken")) || 0;
+// A step that declares an extra string useState *ahead of* the code state,
+// simulating a redeploy that reorders hooks (e.g. adds a name/hint field). The
+// code input is no longer the first string-typed useState, so a solver that
+// blindly dispatches into the first one would set the wrong state and leave the
+// input empty. Exercises the solver's resilience: it must try each string-state
+// candidate until the input's value actually takes the code. 0 = no decoy.
+const DECOY_STEP = Number(KNOBS.get("decoy")) || 0;
+// A step whose input value never equals its `code` state (a trailing space is
+// appended once a code is set), so the solver's "did the input take the code?"
+// check always *misses* on the input's own component — even though `code`
+// (which onSubmit reads) is set correctly. This forces the solver to keep
+// looking past its first candidate, exercising HOW FAR it walks: a correctly
+// scoped solver stays inside the input's component and still submits the right
+// code from state, while one that ascended into ancestors would dispatch the
+// code into the router's path useState and unmount the form. 0 = no mismatch.
+const MISMATCH_STEP = Number(KNOBS.get("mismatch")) || 0;
 
 function xor(text) {
   let out = "";
@@ -137,10 +153,20 @@ function StartPage({ navigate }) {
 }
 
 function StepPage({ step, navigate }) {
-  // The code state must be the first hook: the solver walks this component's
-  // hook list from the input's fiber and dispatches into the first
-  // string-typed useState it finds. (`error` starts null and the submit ref
-  // holds an object, so neither is mistaken for the string code state.)
+  // A decoy string useState placed *ahead of* the code state on the decoy step,
+  // to simulate a redeploy reordering hooks. It is `null` (not a string) on
+  // every other step, so it is not a fiber-walk candidate there and the code
+  // input stays the first string-typed useState — existing scenarios are
+  // untouched. On the decoy step it is "" (a string), so the solver finds it
+  // first and must notice the input didn't take the code before moving on to
+  // the real code state. Declared unconditionally to keep hook order stable.
+  const [decoy] = useState(step === DECOY_STEP ? "" : null);
+  void decoy;
+  // The code state is the first *string-typed* useState (the decoy above is null
+  // except on the decoy step). The solver walks this component's hook list from
+  // the input's fiber and dispatches into each string-typed useState until the
+  // input value takes the code. (`error` starts null and the submit ref holds
+  // an object, so neither is mistaken for the string code state.)
   const [code, setCode] = useState("");
   const [error, setError] = useState(null);
   const submits = useRef(0);
@@ -182,7 +208,11 @@ function StepPage({ step, navigate }) {
       { onSubmit },
       e("input", {
         placeholder: "Enter code",
-        value: code,
+        // On the mismatch step the displayed value never equals `code` (a
+        // trailing space is appended once a code is set), so the solver's
+        // value-took-the-code check always misses — see MISMATCH_STEP. `code`
+        // itself (read by onSubmit) is still the real submitted value.
+        value: step === MISMATCH_STEP && code ? code + " " : code,
         onChange: strict ? () => {} : (ev) => setCode(ev.target.value),
       }),
       e("button", { type: "submit" }, "Submit Code"),

@@ -39,10 +39,13 @@ ignoring synthetic input events as the original site did — then runs the
 actual solver CLI against it and asserts the exit-code contract. It covers a
 clean 30-step run, the fail-fast on a dead site (404), the fail-fast on a
 malformed session (one clear error, not thirty per-step failures), recovery
-via the retry path when a step drops its first submit, and a genuinely
-unpassable step — the run reports it as `FAILED`, lists it under "Steps that
-never confirmed", and exits non-zero rather than printing a false `COMPLETE`.
-It needs the Playwright Chromium build (`npx playwright install chromium`).
+via the retry path when a step drops its first submit, recovery from hook
+reordering when a string `useState` is added ahead of the code state, the
+dispatch staying scoped to the input's own component (never the router) when
+the value check misses, and a genuinely unpassable step — the run reports it
+as `FAILED`, lists it under "Steps that never confirmed", and exits non-zero
+rather than printing a false `COMPLETE`. It needs the Playwright Chromium build
+(`npx playwright install chromium`).
 
 Everything runs in CI on pushes to `main` and on pull requests
 (`.github/workflows/ci.yml`); the unit-test job is pure Node and needs no
@@ -69,8 +72,16 @@ We decrypt them on step 1 and never need to interact with any puzzle. The script
 The code input is a React controlled component. Native value setting (`input.value = ...`) doesn't work because React ignores it. Instead, we walk the React fiber tree from the input element to find the `useState` dispatcher and call it directly:
 
 ```
-input.__reactFiber → walk .return chain → find memoizedState with string type → queue.dispatch(code)
+input.__reactFiber → walk .return to the input's own component → collect its string-typed useState dispatchers
+                   → dispatch into each until the input's value actually becomes the code
 ```
+
+We collect the string-typed `useState` dispatchers of the *input's own component* and try them in order until the input's value actually takes the code, rather than blindly dispatching into the first one. Two things make this robust:
+
+- **Stay in the input's component.** We stop the walk at the first component that owns any string state and never ascend into ancestors. A parent like the SPA router keeps its current path in a string `useState` too, and dispatching the code into *that* would navigate to a bogus route and unmount the form — so an unscoped walk could brick a run. The input's controlled state lives in its own component, so that's the only safe — and correct — place to look.
+- **Try each candidate.** If the challenge is redeployed with a string `useState` ahead of the code state (hook reordering — e.g. an added name/hint field), dispatching into the first state would leave the input empty and silently fail the step; trying each candidate (re-checking the value across a few frames so a slow first commit isn't mistaken for a miss) recovers from that.
+
+The dispatch result records whether the code actually stuck (`applied`), so a stuck step's diagnostic can tell "the input never took the code" (plumbing broke) apart from "the site rejected a code it did receive" (codes changed).
 
 ### 3. Native Form Submit
 
@@ -107,10 +118,12 @@ The initial working version completed all 30 steps in ~48 seconds. Here's what g
 src/
   session.ts      # Pure logic: XOR cipher, decrypt/encrypt, code-for-step mapping. No browser.
   navigation.ts   # Pure logic: anchored step/finish URL patterns + "page navigated" error classifier.
+  diagnostics.ts  # Pure logic: dispatch-result types + the one-line "why did this step fail" message.
   solve.ts        # Orchestration: drives Chromium, dispatches into React, navigates steps.
 test/
   session.test.ts      # Unit tests for session.ts (node:test)
   navigation.test.ts   # Unit tests for navigation.ts (node:test)
+  diagnostics.test.ts  # Unit tests for diagnostics.ts (node:test)
   integration/
     solve.test.ts   # Runs the real solver CLI against the mock challenge
     mock-challenge/ # Local React 18 replica of the challenge's contract
@@ -118,13 +131,16 @@ test/
 
 The browser glue stays in one file (`solve.ts`); only the pure, easily-mistaken
 logic is split out. The XOR cipher and the step-30 off-by-one index math
-(`session.ts`), and the route matching (`navigation.ts`), are the parts most
-likely to break silently, so they live in pure modules where they're covered by
-unit tests instead of only being exercised against a live website. The step URL
-patterns are anchored — `/step2` won't match `/step20` — so a substring
-collision can't make the step loop think it advanced early. An earlier version
-inlined the crypto inside `page.evaluate`; it was moved to Node so the tests and
-the solver run the exact same code path.
+(`session.ts`), the route matching (`navigation.ts`), and the failure-diagnostic
+message (`diagnostics.ts`) are the parts most likely to break silently, so they
+live in pure modules where they're covered by unit tests instead of only being
+exercised against a live website. The step URL patterns are anchored —
+`/step2` won't match `/step20` — so a substring collision can't make the step
+loop think it advanced early. An earlier version inlined the crypto inside
+`page.evaluate`; it was moved to Node so the tests and the solver run the exact
+same code path. (`solve.ts` can't be imported in a unit test — it runs `main()`
+on import — which is the concrete reason the pure logic lives in its own
+modules.)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data flow.
 

@@ -13,6 +13,12 @@ import {
   nextRoutePattern,
   stepPattern,
 } from "./navigation.ts";
+import {
+  describeDispatch,
+  errorMessage,
+  truncate,
+  type DispatchResult,
+} from "./diagnostics.ts";
 
 /** Challenge URL. Override with the CHALLENGE_URL env var. */
 const CHALLENGE_URL =
@@ -45,48 +51,74 @@ async function solveAll(browser: Browser, totalStart: number) {
 
     // Shared helper: set the code input via React fiber (or a valueTracker
     // fallback) and submit the form. Returns a structured result reporting *how*
-    // the value was set ({ ok, method } / { ok, reason, method }), so a stuck
-    // step can distinguish "the site rejected the code" from "we never managed
-    // to set the input at all" — the first thing worth knowing when the
-    // challenge is redeployed and a step won't pass. See DispatchResult below.
+    // the value was set and *whether it stuck* ({ ok, method, applied }), so a
+    // stuck step can tell three causes apart: the site rejected a code it did
+    // receive (format change), the code went into the wrong place so the input
+    // never took it (fiber walk/selector needs updating), or no input was found
+    // at all. That triage is the first thing worth knowing when the challenge is
+    // redeployed and a step won't pass. See DispatchResult in diagnostics.ts.
     (window as any).__dispatchAndSubmit = async (code: string) => {
       const inp = document.querySelector(
         'input[placeholder*="code"], input[placeholder*="Code"]'
       ) as HTMLInputElement | null;
       if (!inp) return { ok: false, reason: "no code input found", method: "none" };
 
-      // Primary: walk the React fiber tree from the input to the nearest
-      // string-typed useState and call its dispatcher directly. A controlled
-      // input ignores `input.value = ...`, so on the challenge's strict steps
-      // this is the only thing that sets the value.
+      const raf = () => new Promise((r) => requestAnimationFrame(r));
+
+      // Primary: walk the React fiber tree up from the input and collect the
+      // string-typed useState dispatchers of the FIRST component that owns any —
+      // i.e. the input's own component — then stop. A controlled input ignores
+      // `input.value = ...`, so on the challenge's strict steps a fiber dispatch
+      // is the only thing that sets the value.
+      //
+      // We deliberately do NOT keep ascending into ancestors: a parent such as
+      // the SPA router keeps its current path in a string useState too, and
+      // dispatching the code into THAT would navigate to a bogus route and
+      // unmount the form. The input's controlled state lives in its own
+      // component, so the nearest owning level is the only safe — and correct —
+      // place to dispatch.
+      //
+      // Within that one component we try each candidate in turn until the
+      // input's value actually becomes the code, rather than blindly taking the
+      // first string state. If a redeploy adds a string useState ahead of the
+      // code state (hook reordering), dispatching into the first one leaves the
+      // input untouched; we detect that and move on. `applied` records whether
+      // any candidate stuck.
       let method = "none";
+      let applied = false;
       const fk = Object.keys(inp).find((k) => k.startsWith("__reactFiber"));
       if (fk) {
+        const dispatchers: Array<(value: string) => void> = [];
         let cur = (inp as any)[fk];
-        for (let i = 0; i < 30 && cur; i++) {
-          if (cur.memoizedState) {
-            let s = cur.memoizedState;
-            while (s) {
-              if (
-                typeof s.memoizedState === "string" &&
-                s.queue?.dispatch
-              ) {
-                s.queue.dispatch(code);
-                method = "fiber";
-                break;
-              }
-              s = s.next;
+        for (let i = 0; i < 30 && cur && dispatchers.length === 0; i++) {
+          let s = cur.memoizedState;
+          while (s) {
+            if (typeof s.memoizedState === "string" && s.queue?.dispatch) {
+              dispatchers.push(s.queue.dispatch);
             }
-            if (method === "fiber") break;
+            s = s.next;
           }
           cur = cur.return;
+        }
+        for (const dispatch of dispatchers) {
+          dispatch(code);
+          method = "fiber";
+          // Let React commit so the input's value reflects the new state. A
+          // freshly-mounted input can take a couple of frames on a cold commit,
+          // so re-check across a few RAFs before deciding a candidate missed —
+          // otherwise a slow first commit looks like the wrong state.
+          for (let f = 0; f < 3 && inp.value !== code; f++) await raf();
+          if (inp.value === code) {
+            applied = true;
+            break;
+          }
         }
       }
 
       // Fallback: the valueTracker trick, for an input that exposes no fiber
       // string state. (Ineffective on inputs that ignore synthetic events, but
       // harmless to attempt — those only ever pass via the fiber path above.)
-      if (method === "none") {
+      if (!applied && method === "none") {
         const setter = Object.getOwnPropertyDescriptor(
           HTMLInputElement.prototype,
           "value"
@@ -97,20 +129,19 @@ async function solveAll(browser: Browser, totalStart: number) {
           inp.dispatchEvent(new Event("input", { bubbles: true }));
           inp.dispatchEvent(new Event("change", { bubbles: true }));
           method = "fallback";
+          await raf();
+          applied = inp.value === code;
         }
       }
 
-      // Wait one RAF for React to process the state update
-      await new Promise((r) => requestAnimationFrame(r));
-
       // Submit via native form event (React intercepts this)
       const form = document.querySelector("form");
-      if (!form) return { ok: false, reason: "no form to submit", method };
+      if (!form) return { ok: false, reason: "no form to submit", method, applied };
       form.dispatchEvent(
         new Event("submit", { bubbles: true, cancelable: true })
       );
 
-      return { ok: true, method };
+      return { ok: true, method, applied };
     };
   });
 
@@ -223,9 +254,10 @@ async function solveAll(browser: Browser, totalStart: number) {
  * just after the timeout — so the caller only treats the final URL as ground
  * truth (see solveAll). Errors that mean "the page navigated" are expected on
  * a successful submit and are not logged. When a step does stay stuck, the
- * FAILED log reports how the input was set (see {@link describeDispatch}) so a
- * redeploy that broke the dispatch is told apart from one that just changed the
- * codes.
+ * FAILED log reports whether the code actually reached the input (see
+ * {@link describeDispatch}) so a redeploy that broke the dispatch plumbing (the
+ * input never took the code) is told apart from one that just changed the codes
+ * (the input took a value the site then rejected).
  */
 async function submitStep(
   page: Page,
@@ -270,19 +302,6 @@ async function submitStep(
   return true;
 }
 
-/** How `__dispatchAndSubmit` set the input value, for the failure diagnostic. */
-type SetMethod = "fiber" | "fallback" | "none";
-
-/**
- * Structured result of one `__dispatchAndSubmit` call, mirroring the helper
- * injected via `addInitScript`. `ok` means the form was submitted; `method`
- * records whether the value reached React via the fiber dispatch, the
- * valueTracker fallback, or neither.
- */
-type DispatchResult =
-  | { ok: true; method: SetMethod }
-  | { ok: false; reason: string; method: SetMethod };
-
 /**
  * Run `__dispatchAndSubmit` in the page and report what it did. Errors that
  * mean "the page navigated" are expected on a successful submit (the execution
@@ -308,35 +327,6 @@ async function dispatchOnce(
     }
     return undefined;
   }
-}
-
-/**
- * One-line summary of a dispatch result for the FAILED log. The point is to
- * separate "the code was set but the site rejected it" (a format/code change)
- * from "we never managed to set the input" (the fiber walk or fallback needs
- * updating) — the key question when a step gets stuck on a redeployed challenge.
- */
-function describeDispatch(result: DispatchResult | undefined): string {
-  if (!result) return "dispatch threw (navigation?)";
-  if (!result.ok) return result.reason;
-  switch (result.method) {
-    case "fiber":
-      return "code set via React fiber dispatch";
-    case "fallback":
-      return "code set via valueTracker fallback";
-    default:
-      return "code could NOT be set (no fiber state, no fallback)";
-  }
-}
-
-/** Best-effort message for logging an unknown thrown value. */
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-/** Clip an error message so a stray stack/long line can't flood the log. */
-function truncate(text: string, max = 80): string {
-  return text.slice(0, max);
 }
 
 main().catch((err) => {

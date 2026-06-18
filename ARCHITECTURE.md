@@ -9,10 +9,12 @@ Challenge in ~23s by extracting the answer codes instead of solving the puzzles.
 src/
   session.ts      # Pure logic: XOR cipher, decrypt/encrypt, code-for-step mapping. No browser, no I/O.
   navigation.ts   # Pure logic: anchored step/finish URL patterns + "page navigated" error classifier.
-  solve.ts        # Orchestration: drives Chromium via Playwright, calls into session.ts + navigation.ts.
+  diagnostics.ts  # Pure logic: dispatch-result types + the one-line "why did this step fail" message.
+  solve.ts        # Orchestration: drives Chromium via Playwright, calls into the pure modules.
 test/
-  session.test.ts     # Unit tests for session.ts (node:test).
-  navigation.test.ts  # Unit tests for navigation.ts (node:test).
+  session.test.ts      # Unit tests for session.ts (node:test).
+  navigation.test.ts   # Unit tests for navigation.ts (node:test).
+  diagnostics.test.ts  # Unit tests for diagnostics.ts (node:test).
   integration/
     solve.test.ts      # End-to-end: spawns the real solver CLI, asserts the exit-code contract.
     mock-challenge/
@@ -21,12 +23,24 @@ test/
       server.ts        # node:http server: UMD from node_modules, SPA catch-all to index.html.
 ```
 
-`session.ts` and `navigation.ts` hold everything that can be reasoned about and
-tested without a browser. `solve.ts` owns all the browser-specific glue
-(launching Chromium, clicking START, dispatching into React, navigating between
-steps). The split exists so the trickiest logic — the cipher, the off-by-one
-index math, and the route matching — is covered by fast, deterministic unit
-tests rather than only exercised against a live website.
+`session.ts`, `navigation.ts`, and `diagnostics.ts` hold everything that can be
+reasoned about and tested without a browser. `solve.ts` owns all the
+browser-specific glue (launching Chromium, clicking START, dispatching into
+React, navigating between steps). The split exists so the trickiest logic — the
+cipher, the off-by-one index math, the route matching, and the failure
+diagnostic — is covered by fast, deterministic unit tests rather than only
+exercised against a live website. (It is also load-bearing: `solve.ts` calls
+`main()` at import time, so it cannot be imported into a unit test; the pure
+logic has to live elsewhere to be testable in isolation.)
+
+`diagnostics.ts` turns the result of an in-browser dispatch attempt into the
+one-line cause printed when a step gets stuck. The dispatch records *how* the
+code input was set (React fiber, the valueTracker fallback, or nothing) and
+*whether the input actually took the value* (`applied`). On a redeployed
+challenge that lets a debugger split three causes apart: no input found, the
+code dispatched into the wrong place so the input stayed empty (plumbing — the
+fiber walk or selector needs updating), or the input took a value the site then
+rejected (a code/format change). Only the last means "update the codes".
 
 `navigation.ts` builds the URL patterns the step loop waits on. They are
 **anchored**: `stepPattern(2)` matches `/step2` but not `/step20`, so a
@@ -50,9 +64,25 @@ so no puzzle ever needs to be solved. Three things make a full run possible:
    per-step failures if the challenge format ever changes).
 
 2. **React fiber dispatch.** The code input is a React controlled component, so
-   `input.value = ...` is ignored. `solve.ts` walks the fiber tree from the
-   input to find the `useState` setter and calls it directly, then fires a
-   native `submit` event that React intercepts.
+   `input.value = ...` is ignored. `solve.ts` walks the fiber tree up from the
+   input to its *own component*, collects that component's string-typed
+   `useState` dispatchers, and dispatches into each in turn (re-checking the
+   value across a few frames) until the input's value actually becomes the code,
+   then fires a native `submit` event that React intercepts. Two properties
+   matter here:
+   - It stops at the input's own component and never ascends into ancestors. A
+     parent such as the SPA router holds its current path in a string `useState`
+     too; dispatching the code into that would navigate to a bogus route and
+     unmount the form. The input's controlled state lives in its own component,
+     so that is the only safe place to dispatch.
+   - Within that component it tries each candidate rather than blindly taking the
+     first string state, which makes the solver resilient to a redeploy that
+     adds a string `useState` ahead of the code state (hook reordering) —
+     otherwise the code would go into the wrong state and the step would silently
+     fail.
+
+   The dispatch reports whether the value stuck (`applied`), which is what the
+   failure diagnostic keys on (see `diagnostics.ts`).
 
 3. **Step 30 off-by-one.** The app's `validateCode(step)` compares the submitted
    value against `codes.get(step + 1)` in a 1-indexed Map. For step 30 that is
@@ -103,15 +133,20 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   fails the run instead of being masked by the valueTracker fallback. The
   session encoding is implemented independently in the mock (not imported from
   `session.ts`) so the solver's crypto is checked against a second
-  implementation rather than against itself. Three test-only knobs, read once
+  implementation rather than against itself. Five test-only knobs, read once
   from the initial page URL's query string (the solver navigates by pushState
   afterwards, so the query is captured at module load), let a test opt into a
   failure mode without disturbing the default happy path: `?codes=N` generates
   a different number of codes, `?flaky=N` makes step N swallow its first
-  submit, and `?broken=N` makes step N reject every code.
+  submit, `?broken=N` makes step N reject every code, `?decoy=N` gives step N
+  an extra string `useState` ahead of the code state (hook reordering), and
+  `?mismatch=N` makes step N's input value never equal its `code` state (a
+  trailing space is appended) so the solver's value-took-the-code check always
+  misses on the input's own component. Each knob defaults off, so the other
+  scenarios are untouched.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract over five scenarios:
+  observable contract over seven scenarios:
   - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
   - the site gone (404) — exit 1 with the fail-fast goto message;
   - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
@@ -130,6 +165,22 @@ The original deployment is gone (HTTP 404 since mid-2026), so
     step 30 is strict, so this proves the failure is the site rejecting a set
     code, not the solver failing to set the input. That is the distinction
     `describeDispatch` exists to surface when the challenge is redeployed.
+  - hook reordering (`?decoy=25`) — step 25 has a string `useState` ahead of the
+    code state, so a solver that dispatched into the first string state would
+    send the code to the wrong place and fail. The run still completes (exit 0,
+    `=== COMPLETE ===`, `/finish`), proving the dispatch loop tries each
+    candidate until the input takes the code. Step 25 is strict, so the recovery
+    can only happen via the fiber path. The test has teeth as a regression
+    guard: reverting the loop to "first string state only" makes step 25 stick
+    and the run fail.
+  - router safety (`?mismatch=22`) — step 22's input value never equals its
+    `code` state, so the solver's value check always misses on the input's own
+    component and it keeps looking. Because the walk is scoped to that component,
+    it stays clear of the router (whose path is also a string `useState`) and
+    still submits the right code (read from state), so the run completes. Teeth:
+    widening the walk back into ancestors makes step 22 dispatch the code into
+    the router, unmount the form, and the run fails with "no form to submit" /
+    "no code input found".
 - The mock app is plain-JS `React.createElement` served with React 18 UMD
   builds straight from `node_modules` (React 19 dropped UMD), so there is no
   bundler in the loop. The puzzles, modals, and distractors of the real

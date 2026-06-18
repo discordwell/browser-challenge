@@ -191,3 +191,68 @@ test(
     }
   },
 );
+
+test(
+  "solver recovers when a string useState precedes the code state (hook reordering)",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?decoy=25 gives step 25 an extra string useState ahead of the code
+      // state — a stand-in for a redeploy that reorders hooks (adds a name/hint
+      // field, etc.). The code input is no longer the first string-typed
+      // useState, so a solver that blindly dispatched into the first one would
+      // send the code into the decoy, leave the input empty, and fail the step
+      // with a misleading "set via React fiber" diagnostic. The solver instead
+      // tries each candidate until the input's value actually takes the code, so
+      // the run still completes. Step 25 is "strict" (ignores synthetic onChange),
+      // so this can only pass via the fiber path — the resilience is genuinely
+      // exercised, not papered over by the valueTracker fallback. This test has
+      // teeth as a regression guard: reverting the solver to "first string state
+      // only" makes step 25 stick and the run FAIL.
+      const run = await runSolver(`${mock.url}/?decoy=25`);
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 0, `expected exit code 0${detail}`);
+      assert.match(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(run.stdout, /Final URL: .*\/finish/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /FAILED/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);
+
+test(
+  "solver keeps its dispatch inside the input's component (never into the router)",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?mismatch=22 makes step 22's displayed value never equal its `code`
+      // state, so the solver's "did the input take the code?" check misses on
+      // the input's own component and it keeps looking. The router (App) holds
+      // its current path in a *string* useState too, so a solver that walked
+      // past the input's component into ancestors would dispatch the extracted
+      // code into the router, navigate to a bogus route, and unmount the form —
+      // bricking the run. Because the solver scopes its candidates to the
+      // input's own component, it instead submits the right code (which onSubmit
+      // reads from state) and the run still completes. This has teeth: widening
+      // the fiber walk back to ancestors makes step 22 dispatch into the router
+      // and the run FAIL with no form/input found.
+      const run = await runSolver(`${mock.url}/?mismatch=22`);
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 0, `expected exit code 0${detail}`);
+      assert.match(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(run.stdout, /Final URL: .*\/finish/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /FAILED/, detail);
+      // The run must never have been knocked onto the "Page not found" route by
+      // a stray dispatch into the router's path state.
+      assert.doesNotMatch(run.stdout + run.stderr, /no form to submit/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /no code input found/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);
