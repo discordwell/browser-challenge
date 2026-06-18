@@ -256,3 +256,70 @@ test(
     }
   },
 );
+
+test(
+  "solver fills an uncontrolled input via the valueTracker fallback (no string useState)",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?uncontrolled=12 makes step 12 render an uncontrolled input in a
+      // component with NO string useState — the one shape that has no fiber
+      // string-state candidate, so the only way to fill it is the solver's
+      // valueTracker fallback (set inp.value via the native setter). The run
+      // must still complete past step 12 to /finish. Two teeth here:
+      //  - It exercises the fallback path end-to-end (every other step passes
+      //    via the fiber dispatch, so the fallback is otherwise dead code).
+      //  - It pins the walk's scoping: because the input's own component owns no
+      //    string state, a walk that ascended "until it finds string state"
+      //    would dispatch the code into the router's path useState, render
+      //    "Page not found", and fail the run. Completing proves the walk stops
+      //    at the input's own component and falls back instead.
+      const run = await runSolver(`${mock.url}/?uncontrolled=12`);
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 0, `expected exit code 0${detail}`);
+      assert.match(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(run.stdout, /Final URL: .*\/finish/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /FAILED/, detail);
+      // A stray dispatch into the router would have unmounted the form and
+      // surfaced these; their absence confirms the walk stayed scoped.
+      assert.doesNotMatch(run.stdout + run.stderr, /no form to submit/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /no code input found/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);
+
+test(
+  "solver's failure diagnostic reports the valueTracker fallback when an uncontrolled input is rejected",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?uncontrolled=30&broken=30 makes step 30 an uncontrolled input that
+      // rejects every code. Steps 1-29 pass; step 30 fills via the fallback
+      // (no fiber string state) but never validates, so the run FAILs. This
+      // pins the last unexercised branch of describeDispatch end-to-end: the
+      // FAILED line must report the value was "set via valueTracker fallback"
+      // (method "fallback", applied true) — proving the fallback both ran and
+      // actually filled the input, not that the solver failed to set it.
+      // Teeth: against a solver whose walk ascends past the stateless input
+      // component into the router, step 30 dispatches the code as a route and
+      // the diagnostic is "no form to submit" instead — the assertion below
+      // only holds with the scoped walk + reachable fallback.
+      const run = await runSolver(`${mock.url}/?uncontrolled=30&broken=30`);
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 1, `expected exit code 1${detail}`);
+      assert.match(run.stdout, /=== FAILED ===/, detail);
+      assert.doesNotMatch(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(run.stderr, /Step 30: FAILED/, detail);
+      assert.match(run.stderr, /Steps that never confirmed: 30/, detail);
+      assert.match(run.stderr, /set via valueTracker fallback/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);

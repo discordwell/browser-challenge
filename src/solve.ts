@@ -65,18 +65,22 @@ async function solveAll(browser: Browser, totalStart: number) {
 
       const raf = () => new Promise((r) => requestAnimationFrame(r));
 
-      // Primary: walk the React fiber tree up from the input and collect the
-      // string-typed useState dispatchers of the FIRST component that owns any —
-      // i.e. the input's own component — then stop. A controlled input ignores
-      // `input.value = ...`, so on the challenge's strict steps a fiber dispatch
-      // is the only thing that sets the value.
+      // Primary: walk up the React fiber tree from the input to the component
+      // that actually rendered it — the first function-component fiber — and
+      // collect THAT component's string-typed useState dispatchers, then stop. A
+      // controlled input ignores `input.value = ...`, so on the challenge's
+      // strict steps a fiber dispatch is the only thing that sets the value.
       //
-      // We deliberately do NOT keep ascending into ancestors: a parent such as
-      // the SPA router keeps its current path in a string useState too, and
-      // dispatching the code into THAT would navigate to a bogus route and
-      // unmount the form. The input's controlled state lives in its own
-      // component, so the nearest owning level is the only safe — and correct —
-      // place to dispatch.
+      // We stop at the input's own component and never ascend into ancestors: a
+      // parent such as the SPA router keeps its current path in a string
+      // useState too, and dispatching the code into THAT would navigate to a
+      // bogus route and unmount the form. The input's controlled state lives in
+      // its own component, so that is the only safe — and correct — place to
+      // dispatch. (Scoping on "the first component that owns string state"
+      // instead is subtly wrong: an uncontrolled input's component owns none, so
+      // the walk would sail past it into the router. Stopping at the component
+      // itself means such an input finds no candidate here and falls through to
+      // the valueTracker fallback below, instead of bricking the run.)
       //
       // Within that one component we try each candidate in turn until the
       // input's value actually becomes the code, rather than blindly taking the
@@ -89,16 +93,20 @@ async function solveAll(browser: Browser, totalStart: number) {
       const fk = Object.keys(inp).find((k) => k.startsWith("__reactFiber"));
       if (fk) {
         const dispatchers: Array<(value: string) => void> = [];
+        // Ascend through the host-element fibers (input, form, …) to the first
+        // function-component fiber: the input's own component. `cur.type` is a
+        // tag string ("input"/"form"/…) for host elements and the function for a
+        // component, so this stops at the component that rendered the input.
         let cur = (inp as any)[fk];
-        for (let i = 0; i < 30 && cur && dispatchers.length === 0; i++) {
-          let s = cur.memoizedState;
-          while (s) {
-            if (typeof s.memoizedState === "string" && s.queue?.dispatch) {
-              dispatchers.push(s.queue.dispatch);
-            }
-            s = s.next;
-          }
+        for (let i = 0; i < 30 && cur && typeof cur.type !== "function"; i++) {
           cur = cur.return;
+        }
+        // Collect that one component's string-typed useState dispatchers. It may
+        // own none (an uncontrolled input) — then the fallback below runs.
+        for (let s = cur?.memoizedState; s; s = s.next) {
+          if (typeof s.memoizedState === "string" && s.queue?.dispatch) {
+            dispatchers.push(s.queue.dispatch);
+          }
         }
         for (const dispatch of dispatchers) {
           dispatch(code);

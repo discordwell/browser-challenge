@@ -64,6 +64,19 @@ const DECOY_STEP = Number(KNOBS.get("decoy")) || 0;
 // code from state, while one that ascended into ancestors would dispatch the
 // code into the router's path useState and unmount the form. 0 = no mismatch.
 const MISMATCH_STEP = Number(KNOBS.get("mismatch")) || 0;
+// A step that renders an *uncontrolled* input (no `value`/`onChange`; its value
+// is read from the DOM on submit) in a component that holds NO string useState.
+// The solver's fiber walk therefore finds no string-state dispatcher in the
+// input's own component and must fall back to the valueTracker path (set
+// `inp.value` via the native setter + dispatch input/change) to fill it. This
+// is the ONLY scenario that exercises that fallback: every other step's input
+// is a controlled component whose code state the fiber dispatch sets directly.
+// It also pins the walk's scoping — because the input's own component owns no
+// string state, a walk that ascended "until it finds string state" would sail
+// past it into the router (App's path useState) and dispatch the code as a
+// route, unmounting the form and bricking the run. A correctly scoped walk
+// stops at the input's own component, finds nothing, and falls back. 0 = none.
+const UNCONTROLLED_STEP = Number(KNOBS.get("uncontrolled")) || 0;
 
 function xor(text) {
   let out = "";
@@ -221,6 +234,45 @@ function StepPage({ step, navigate }) {
   );
 }
 
+// A step whose input is *uncontrolled*: no `value`/`onChange`, so React never
+// overwrites what the DOM holds, and onSubmit reads the value straight off the
+// input via a ref. Crucially this component holds its only state in a `useRef`
+// (an object) and declares NO `useState` at all, so it can never own a
+// string-typed state — the solver's fiber walk finds no candidate here and must
+// use the valueTracker fallback to fill the input. (We deliberately don't render
+// an "Invalid code" message via state the way StepPage does: the solver only
+// reads the URL, never the error UI, and keeping the component state-free makes
+// the "no string useState" property structural rather than contingent on
+// validation passing.) See UNCONTROLLED_STEP. Routed to only when that knob
+// selects this step; every other step uses the controlled StepPage above.
+function UncontrolledStep({ step, navigate }) {
+  const inputRef = useRef(null);
+
+  const onSubmit = (ev) => {
+    ev.preventDefault();
+    // The broken step rejects every code (swallow without navigating); see
+    // BROKEN_STEP. Used by the fallback-diagnostic test to drive a genuine
+    // FAILED whose dispatch method is "fallback".
+    if (step === BROKEN_STEP) return;
+    const code = inputRef.current ? inputRef.current.value : "";
+    if (validateCode(step, code)) {
+      navigate(step === STEP_COUNT ? "/finish" : "/step" + (step + 1));
+    }
+  };
+
+  return e(
+    "main",
+    null,
+    e("h1", null, "Step " + step + " of " + STEP_COUNT),
+    e(
+      "form",
+      { onSubmit },
+      e("input", { ref: inputRef, placeholder: "Enter code" }),
+      e("button", { type: "submit" }, "Submit Code"),
+    ),
+  );
+}
+
 function FinishPage() {
   return e("main", null, e("h1", null, "Challenge Complete!"));
 }
@@ -236,9 +288,11 @@ function App() {
   if (stepMatch) {
     const step = Number(stepMatch[1]);
     if (step >= 1 && step <= STEP_COUNT && ensureCodes()) {
-      // Keyed by step so each step mounts a fresh StepPage (fresh input
-      // state), as the real app's router remounts its route component.
-      return e(StepPage, { key: step, step, navigate });
+      // Keyed by step so each step mounts a fresh page (fresh input state), as
+      // the real app's router remounts its route component. The uncontrolled
+      // step uses its own page; every other step uses the controlled StepPage.
+      const Page = step === UNCONTROLLED_STEP ? UncontrolledStep : StepPage;
+      return e(Page, { key: step, step, navigate });
     }
   }
   if (path === "/finish") return e(FinishPage);

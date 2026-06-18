@@ -65,24 +65,34 @@ so no puzzle ever needs to be solved. Three things make a full run possible:
 
 2. **React fiber dispatch.** The code input is a React controlled component, so
    `input.value = ...` is ignored. `solve.ts` walks the fiber tree up from the
-   input to its *own component*, collects that component's string-typed
-   `useState` dispatchers, and dispatches into each in turn (re-checking the
-   value across a few frames) until the input's value actually becomes the code,
-   then fires a native `submit` event that React intercepts. Two properties
-   matter here:
+   input to its *own component* (the first function-component fiber up the
+   `.return` chain — host elements like `input`/`form` have a string `type`, a
+   component has a function), collects that component's string-typed `useState`
+   dispatchers, and dispatches into each in turn (re-checking the value across a
+   few frames) until the input's value actually becomes the code, then fires a
+   native `submit` event that React intercepts. Three properties matter here:
    - It stops at the input's own component and never ascends into ancestors. A
      parent such as the SPA router holds its current path in a string `useState`
      too; dispatching the code into that would navigate to a bogus route and
      unmount the form. The input's controlled state lives in its own component,
-     so that is the only safe place to dispatch.
+     so that is the only safe place to dispatch. Stopping at the *component*
+     (not at "the first component that owns string state") is what makes this
+     hold even for an uncontrolled input: that component owns no string state,
+     and a walk scoped on "first string state found" would skip past it into the
+     router — so this scoping is load-bearing, not cosmetic.
    - Within that component it tries each candidate rather than blindly taking the
      first string state, which makes the solver resilient to a redeploy that
      adds a string `useState` ahead of the code state (hook reordering) —
      otherwise the code would go into the wrong state and the step would silently
      fail.
+   - If the component owns no string `useState` (an uncontrolled input that reads
+     its value from the DOM), there is no fiber candidate, so the solver falls
+     back to the valueTracker trick (native `value` setter + `input`/`change`
+     events). This is the one path that bypasses the fiber dispatch.
 
-   The dispatch reports whether the value stuck (`applied`), which is what the
-   failure diagnostic keys on (see `diagnostics.ts`).
+   The dispatch reports both *how* the value was set (`method`: fiber, fallback,
+   or none) and whether it stuck (`applied`), which is what the failure
+   diagnostic keys on (see `diagnostics.ts`).
 
 3. **Step 30 off-by-one.** The app's `validateCode(step)` compares the submitted
    value against `codes.get(step + 1)` in a 1-indexed Map. For step 30 that is
@@ -133,20 +143,22 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   fails the run instead of being masked by the valueTracker fallback. The
   session encoding is implemented independently in the mock (not imported from
   `session.ts`) so the solver's crypto is checked against a second
-  implementation rather than against itself. Five test-only knobs, read once
+  implementation rather than against itself. Six test-only knobs, read once
   from the initial page URL's query string (the solver navigates by pushState
   afterwards, so the query is captured at module load), let a test opt into a
   failure mode without disturbing the default happy path: `?codes=N` generates
   a different number of codes, `?flaky=N` makes step N swallow its first
   submit, `?broken=N` makes step N reject every code, `?decoy=N` gives step N
-  an extra string `useState` ahead of the code state (hook reordering), and
+  an extra string `useState` ahead of the code state (hook reordering),
   `?mismatch=N` makes step N's input value never equal its `code` state (a
   trailing space is appended) so the solver's value-took-the-code check always
-  misses on the input's own component. Each knob defaults off, so the other
-  scenarios are untouched.
+  misses on the input's own component, and `?uncontrolled=N` renders step N's
+  input as an uncontrolled element in a component with no string `useState`, so
+  the fiber walk finds no candidate and the solver must use the valueTracker
+  fallback. Each knob defaults off, so the other scenarios are untouched.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract over seven scenarios:
+  observable contract over nine scenarios:
   - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
   - the site gone (404) — exit 1 with the fail-fast goto message;
   - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
@@ -181,6 +193,25 @@ The original deployment is gone (HTTP 404 since mid-2026), so
     widening the walk back into ancestors makes step 22 dispatch the code into
     the router, unmount the form, and the run fails with "no form to submit" /
     "no code input found".
+  - valueTracker fallback (`?uncontrolled=12`) — step 12's input is uncontrolled
+    and its component owns no string `useState`, so the fiber walk finds no
+    candidate and the solver must fill the input via the valueTracker fallback
+    (native `value` setter). The run still completes. This is the only scenario
+    that exercises the fallback — every other step passes via the fiber dispatch
+    — and it is a second guard on the walk's scoping: a walk that ascended "until
+    it finds string state" would reach the router (the stateless input component
+    owns none), dispatch the code as a route, and fail. Teeth: reverting the
+    walk to that ascent makes step 12 render "Page not found" and the run fails.
+  - fallback diagnostic (`?uncontrolled=30&broken=30`) — step 30 is an
+    uncontrolled input that also rejects every code. Steps 1-29 pass; step 30
+    fills via the fallback but never validates, so the run FAILs and the FAILED
+    line must report the value was "set via valueTracker fallback" (method
+    "fallback", `applied` true). This pins `describeDispatch`'s last unexercised
+    branch end-to-end — proving the fallback both ran and actually filled the
+    input, not that the solver failed to set it. (The uncontrolled step holds no
+    `useState` at all — only a `useRef` — so the component can never own a
+    string-typed state and the reported method can't drift to `fiber` on a
+    retry; its broken submit simply swallows without navigating.)
 - The mock app is plain-JS `React.createElement` served with React 18 UMD
   builds straight from `node_modules` (React 19 dropped UMD), so there is no
   bundler in the loop. The puzzles, modals, and distractors of the real
