@@ -27,6 +27,19 @@ const CHALLENGE_URL =
 /** Run headless with HEADLESS=1; defaults to headed, as the challenge expects. */
 const HEADLESS = /^(1|true)$/i.test(process.env.HEADLESS ?? "");
 
+/**
+ * Selector for the challenge's code input. Defined once and shared between the
+ * in-browser dispatch helper (`document.querySelector`) and the Playwright
+ * `waitForSelector` below, so the two can never drift apart — and that drift
+ * would be *silent*: if only the `waitForSelector` copy changed, the dispatch
+ * helper would still find the input and the step would still pass, so a stale
+ * wait would go unnoticed. Keeping a single source of truth removes that
+ * footgun. Matched case-insensitively (`i`) so a redeploy that capitalises the
+ * placeholder ("Enter Code", "CODE") still matches; Playwright's selector engine
+ * and the browser's `querySelector` both honour the flag.
+ */
+const CODE_INPUT_SELECTOR = 'input[placeholder*="code" i]';
+
 async function main() {
   const totalStart = performance.now();
   console.log("Launching browser...");
@@ -44,8 +57,10 @@ async function solveAll(browser: Browser, totalStart: number) {
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  // Inject helpers into every page context
-  await page.addInitScript(() => {
+  // Inject helpers into every page context. The code-input selector is passed
+  // in (rather than re-typed inside the browser closure) so it shares the single
+  // CODE_INPUT_SELECTOR source of truth with submitStep's waitForSelector.
+  await page.addInitScript((codeInputSelector: string) => {
     // esbuild __name helper (tsx adds it to compiled evaluate functions)
     (window as any).__name = (fn: any, _n: string) => fn;
 
@@ -59,17 +74,18 @@ async function solveAll(browser: Browser, totalStart: number) {
     // redeployed and a step won't pass. See DispatchResult in diagnostics.ts.
     (window as any).__dispatchAndSubmit = async (code: string) => {
       const inp = document.querySelector(
-        'input[placeholder*="code"], input[placeholder*="Code"]'
+        codeInputSelector
       ) as HTMLInputElement | null;
       if (!inp) return { ok: false, reason: "no code input found", method: "none" };
 
       const raf = () => new Promise((r) => requestAnimationFrame(r));
 
       // Primary: walk up the React fiber tree from the input to the component
-      // that actually rendered it — the first function-component fiber — and
-      // collect THAT component's string-typed useState dispatchers, then stop. A
-      // controlled input ignores `input.value = ...`, so on the challenge's
-      // strict steps a fiber dispatch is the only thing that sets the value.
+      // that actually rendered it — the first component fiber, function or
+      // forwardRef — and collect THAT component's string-typed useState
+      // dispatchers, then stop. A controlled input ignores `input.value = ...`,
+      // so on the challenge's strict steps a fiber dispatch is the only thing
+      // that sets the value.
       //
       // We stop at the input's own component and never ascend into ancestors: a
       // parent such as the SPA router keeps its current path in a string
@@ -93,12 +109,21 @@ async function solveAll(browser: Browser, totalStart: number) {
       const fk = Object.keys(inp).find((k) => k.startsWith("__reactFiber"));
       if (fk) {
         const dispatchers: Array<(value: string) => void> = [];
-        // Ascend through the host-element fibers (input, form, …) to the first
-        // function-component fiber: the input's own component. `cur.type` is a
-        // tag string ("input"/"form"/…) for host elements and the function for a
-        // component, so this stops at the component that rendered the input.
+        // Ascend through the host-element fibers (input, form, …) to the input's
+        // own component. `cur.type` is a tag string ("input"/"form"/…) for host
+        // elements, so we skip those; we stop at the first *component* fiber.
+        // A plain (or React.memo'd) component has a function `type`; a forwardRef
+        // component has an object `type` ({$$typeof: Symbol(react.forward_ref)})
+        // and still owns the input's hooks, so a `typeof === "function"` test
+        // alone would skip past it and walk into the router — the same brick the
+        // scoping is meant to prevent. Recognise both.
+        const FORWARD_REF = Symbol.for("react.forward_ref");
+        const isComponentFiber = (fiber: any) => {
+          const t = fiber?.type;
+          return typeof t === "function" || (t != null && t.$$typeof === FORWARD_REF);
+        };
         let cur = (inp as any)[fk];
-        for (let i = 0; i < 30 && cur && typeof cur.type !== "function"; i++) {
+        for (let i = 0; i < 30 && cur && !isComponentFiber(cur); i++) {
           cur = cur.return;
         }
         // Collect that one component's string-typed useState dispatchers. It may
@@ -151,7 +176,7 @@ async function solveAll(browser: Browser, totalStart: number) {
 
       return { ok: true, method, applied };
     };
-  });
+  }, CODE_INPUT_SELECTOR);
 
   console.log("Navigating to challenge...");
   const response = await page.goto(CHALLENGE_URL, {
@@ -275,10 +300,10 @@ async function submitStep(
 ): Promise<boolean> {
   // Wait for the input to appear; a short fixed wait if the selector times out.
   try {
-    await page.waitForSelector(
-      'input[placeholder*="code"], input[placeholder*="Code"]',
-      { timeout: 2000, state: "attached" }
-    );
+    await page.waitForSelector(CODE_INPUT_SELECTOR, {
+      timeout: 2000,
+      state: "attached",
+    });
   } catch {
     await page.waitForTimeout(200);
   }

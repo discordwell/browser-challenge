@@ -44,10 +44,13 @@ reordering when a string `useState` is added ahead of the code state, the
 dispatch staying scoped to the input's own component (never the router) when
 the value check misses, an uncontrolled input with no string `useState`
 (the only shape that exercises the valueTracker fallback — and another guard
-that the scoped walk never reaches the router), and a genuinely unpassable
-step — the run reports it as `FAILED`, lists it under "Steps that never
-confirmed", and exits non-zero rather than printing a false `COMPLETE`. It
-needs the Playwright Chromium build (`npx playwright install chromium`).
+that the scoped walk never reaches the router), a `forwardRef`-wrapped input
+component (whose owning fiber has an object type, not a function — the walk has
+to recognise it as a component boundary or it walks into the router), and a
+genuinely unpassable step — the run reports it as `FAILED`, lists it under
+"Steps that never confirmed", and exits non-zero rather than printing a false
+`COMPLETE`. It needs the Playwright Chromium build
+(`npx playwright install chromium`).
 
 Everything runs in CI on pushes to `main` and on pull requests
 (`.github/workflows/ci.yml`); the unit-test job is pure Node and needs no
@@ -80,7 +83,7 @@ input.__reactFiber → walk .return to the input's own component → collect its
 
 We collect the string-typed `useState` dispatchers of the *input's own component* and try them in order until the input's value actually takes the code, rather than blindly dispatching into the first one. Two things make this robust:
 
-- **Stay in the input's component.** We stop the walk at the input's own component — the first function component up the tree from the input element — and never ascend into ancestors. A parent like the SPA router keeps its current path in a string `useState` too, and dispatching the code into *that* would navigate to a bogus route and unmount the form — so an unscoped walk could brick a run. The input's controlled state lives in its own component, so that's the only safe — and correct — place to look. (Scoping instead on "the first component that *owns string state*" is subtly wrong: an uncontrolled input's component owns none, so that walk would sail past it into the router. Stopping at the component itself means such an input simply finds no candidate and falls through to the fallback below.)
+- **Stay in the input's component.** We stop the walk at the input's own component — the first component up the tree from the input element — and never ascend into ancestors. A parent like the SPA router keeps its current path in a string `useState` too, and dispatching the code into *that* would navigate to a bogus route and unmount the form — so an unscoped walk could brick a run. The input's controlled state lives in its own component, so that's the only safe — and correct — place to look. (Scoping instead on "the first component that *owns string state*" is subtly wrong: an uncontrolled input's component owns none, so that walk would sail past it into the router. Stopping at the component itself means such an input simply finds no candidate and falls through to the fallback below.) "Component" here means a function component *or* a `forwardRef` one: a `forwardRef`'s fiber has an object `type` (`{$$typeof: Symbol(react.forward_ref)}`), not a function, yet it still owns the input's hooks — so a `typeof type === "function"` test alone would skip past it into the router. (A `React.memo`'d function component needs no special case: React resolves its fiber `type` back to the inner function.)
 - **Try each candidate.** If the challenge is redeployed with a string `useState` ahead of the code state (hook reordering — e.g. an added name/hint field), dispatching into the first state would leave the input empty and silently fail the step; trying each candidate (re-checking the value across a few frames so a slow first commit isn't mistaken for a miss) recovers from that.
 
 If the input's component exposes no string `useState` at all (an uncontrolled input that reads its value from the DOM), there's no fiber candidate to dispatch into, so we fall back to the *valueTracker* trick: set `input.value` via the native setter and fire `input`/`change`. This is the only path that doesn't go through a fiber dispatch; it's covered end-to-end by the `?uncontrolled=N` mock scenario.

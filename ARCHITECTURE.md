@@ -65,12 +65,15 @@ so no puzzle ever needs to be solved. Three things make a full run possible:
 
 2. **React fiber dispatch.** The code input is a React controlled component, so
    `input.value = ...` is ignored. `solve.ts` walks the fiber tree up from the
-   input to its *own component* (the first function-component fiber up the
-   `.return` chain — host elements like `input`/`form` have a string `type`, a
-   component has a function), collects that component's string-typed `useState`
-   dispatchers, and dispatches into each in turn (re-checking the value across a
-   few frames) until the input's value actually becomes the code, then fires a
-   native `submit` event that React intercepts. Three properties matter here:
+   input to its *own component* (the first component fiber up the `.return`
+   chain — host elements like `input`/`form` have a string `type`, so the walk
+   skips them; a function component has a function `type`, and a `forwardRef`
+   component has an object `type` carrying `$$typeof: Symbol(react.forward_ref)`,
+   both of which count as a component), collects that component's string-typed
+   `useState` dispatchers, and dispatches into each in turn (re-checking the
+   value across a few frames) until the input's value actually becomes the code,
+   then fires a native `submit` event that React intercepts. Three properties
+   matter here:
    - It stops at the input's own component and never ascends into ancestors. A
      parent such as the SPA router holds its current path in a string `useState`
      too; dispatching the code into that would navigate to a bogus route and
@@ -79,7 +82,12 @@ so no puzzle ever needs to be solved. Three things make a full run possible:
      (not at "the first component that owns string state") is what makes this
      hold even for an uncontrolled input: that component owns no string state,
      and a walk scoped on "first string state found" would skip past it into the
-     router — so this scoping is load-bearing, not cosmetic.
+     router — so this scoping is load-bearing, not cosmetic. The "what counts as
+     a component" test must include `forwardRef` (object `type`), not just
+     functions: a `forwardRef`-wrapped input component still owns the input's
+     hooks, so a `typeof type === "function"` check alone would skip past it into
+     the router — the same brick. (`React.memo` of a function needs no special
+     case: React resolves the memo fiber's `type` back to the inner function.)
    - Within that component it tries each candidate rather than blindly taking the
      first string state, which makes the solver resilient to a redeploy that
      adds a string `useState` ahead of the code state (hook reordering) —
@@ -143,7 +151,7 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   fails the run instead of being masked by the valueTracker fallback. The
   session encoding is implemented independently in the mock (not imported from
   `session.ts`) so the solver's crypto is checked against a second
-  implementation rather than against itself. Six test-only knobs, read once
+  implementation rather than against itself. Seven test-only knobs, read once
   from the initial page URL's query string (the solver navigates by pushState
   afterwards, so the query is captured at module load), let a test opt into a
   failure mode without disturbing the default happy path: `?codes=N` generates
@@ -152,13 +160,16 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   an extra string `useState` ahead of the code state (hook reordering),
   `?mismatch=N` makes step N's input value never equal its `code` state (a
   trailing space is appended) so the solver's value-took-the-code check always
-  misses on the input's own component, and `?uncontrolled=N` renders step N's
+  misses on the input's own component, `?uncontrolled=N` renders step N's
   input as an uncontrolled element in a component with no string `useState`, so
   the fiber walk finds no candidate and the solver must use the valueTracker
-  fallback. Each knob defaults off, so the other scenarios are untouched.
+  fallback, and `?forwardref=N` wraps step N's component in `React.forwardRef`
+  so the input's owning fiber has an object `type` instead of a function, which
+  the walk must still recognise as a component boundary or it walks into the
+  router. Each knob defaults off, so the other scenarios are untouched.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract over nine scenarios:
+  observable contract over ten scenarios:
   - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
   - the site gone (404) — exit 1 with the fail-fast goto message;
   - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
@@ -202,6 +213,16 @@ The original deployment is gone (HTTP 404 since mid-2026), so
     it finds string state" would reach the router (the stateless input component
     owns none), dispatch the code as a route, and fail. Teeth: reverting the
     walk to that ascent makes step 12 render "Page not found" and the run fails.
+  - forwardRef component (`?forwardref=23`) — step 23's component is wrapped in
+    `React.forwardRef`, so the input's nearest component fiber has an object
+    `type` (`{$$typeof: react.forward_ref}`) rather than a function, and that
+    fiber is where the `code` state lives. A walk that recognises components only
+    by `typeof type === "function"` skips past it into the router, dispatches the
+    code as a route, and bricks the run; the solver instead treats the forwardRef
+    fiber as a component boundary and completes. Step 23 is strict, so this can
+    only pass via the fiber path. Teeth: dropping the forwardRef branch from the
+    component check makes step 23 dispatch into the router and the run fails with
+    "no form to submit" / "no code input found".
   - fallback diagnostic (`?uncontrolled=30&broken=30`) — step 30 is an
     uncontrolled input that also rejects every code. Steps 1-29 pass; step 30
     fills via the fallback but never validates, so the run FAILs and the FAILED

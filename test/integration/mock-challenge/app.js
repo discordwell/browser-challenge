@@ -77,6 +77,18 @@ const MISMATCH_STEP = Number(KNOBS.get("mismatch")) || 0;
 // route, unmounting the form and bricking the run. A correctly scoped walk
 // stops at the input's own component, finds nothing, and falls back. 0 = none.
 const UNCONTROLLED_STEP = Number(KNOBS.get("uncontrolled")) || 0;
+// A step whose owning component is wrapped in React.forwardRef, so the input's
+// nearest component fiber has an *object* type ({$$typeof: react.forward_ref})
+// rather than a function — and that fiber is where the code state lives. A
+// solver that recognises the input's component only by `typeof type ===
+// "function"` walks straight past the forwardRef fiber into the router (App's
+// path useState), dispatches the extracted code as a route, unmounts the form,
+// and bricks the run. The solver must treat a forwardRef fiber as a component
+// boundary too. (React.memo of a plain function needs no special handling: React
+// resolves a SimpleMemoComponent's `type` back to the inner function, so the
+// `typeof === "function"` check already stops there. forwardRef is the case it
+// doesn't catch.) 0 = none.
+const FORWARDREF_STEP = Number(KNOBS.get("forwardref")) || 0;
 
 function xor(text) {
   let out = "";
@@ -234,6 +246,20 @@ function StepPage({ step, navigate }) {
   );
 }
 
+// StepPage wrapped in React.forwardRef. Calling StepPage(props) inline (a plain
+// function call, not React.createElement) runs StepPage's hooks during *this*
+// forwardRef component's render, so the forwardRef fiber — the input's nearest
+// component ancestor — is what holds the `code` string state. That makes the
+// input's owning fiber have an object `type` ({$$typeof: react.forward_ref})
+// instead of a function, which the solver's component walk must still recognise.
+// The `ref` is unused (the input is controlled); it exists only so React creates
+// a genuine ForwardRef fiber. See FORWARDREF_STEP. Routed to only when that knob
+// selects this step.
+const ForwardRefStep = React.forwardRef(function ForwardRefStepInner(props, ref) {
+  void ref;
+  return StepPage(props);
+});
+
 // A step whose input is *uncontrolled*: no `value`/`onChange`, so React never
 // overwrites what the DOM holds, and onSubmit reads the value straight off the
 // input via a ref. Crucially this component holds its only state in a `useRef`
@@ -289,9 +315,16 @@ function App() {
     const step = Number(stepMatch[1]);
     if (step >= 1 && step <= STEP_COUNT && ensureCodes()) {
       // Keyed by step so each step mounts a fresh page (fresh input state), as
-      // the real app's router remounts its route component. The uncontrolled
-      // step uses its own page; every other step uses the controlled StepPage.
-      const Page = step === UNCONTROLLED_STEP ? UncontrolledStep : StepPage;
+      // the real app's router remounts its route component. The uncontrolled and
+      // forwardRef steps use their own page variants; every other step uses the
+      // controlled StepPage. (Both knobs default to 0, which no real step equals,
+      // so the default path is StepPage.)
+      const Page =
+        step === UNCONTROLLED_STEP
+          ? UncontrolledStep
+          : step === FORWARDREF_STEP
+            ? ForwardRefStep
+            : StepPage;
       return e(Page, { key: step, step, navigate });
     }
   }

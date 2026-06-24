@@ -293,6 +293,42 @@ test(
 );
 
 test(
+  "solver recognises a forwardRef-wrapped input component (never walks into the router)",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?forwardref=23 wraps step 23's component in React.forwardRef, so the
+      // input's nearest component fiber has an *object* type ({$$typeof:
+      // react.forward_ref}) instead of a function — and that fiber is where the
+      // code state lives. A solver that recognises the input's component only by
+      // `typeof type === "function"` walks straight past the forwardRef fiber
+      // into the router (App's path useState), dispatches the extracted code as a
+      // route, unmounts the form, and bricks the run. The solver instead treats
+      // the forwardRef fiber as a component boundary, dispatches into its `code`
+      // state, and the run completes. Step 23 is strict (≥19), so this can only
+      // pass via the fiber path — the valueTracker fallback can't rescue it.
+      // Teeth: removing the forwardRef branch from the walk's component check
+      // makes step 23 dispatch into the router and the run FAIL with "no form to
+      // submit" / "no code input found".
+      const run = await runSolver(`${mock.url}/?forwardref=23`);
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 0, `expected exit code 0${detail}`);
+      assert.match(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(run.stdout, /Final URL: .*\/finish/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /FAILED/, detail);
+      // A stray dispatch into the router would have unmounted the form and
+      // surfaced these; their absence confirms the walk stopped at the forwardRef.
+      assert.doesNotMatch(run.stdout + run.stderr, /no form to submit/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /no code input found/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);
+
+test(
   "solver's failure diagnostic reports the valueTracker fallback when an uncontrolled input is rejected",
   { timeout: 120_000 },
   async () => {
