@@ -72,7 +72,9 @@ so no puzzle ever needs to be solved. Three things make a full run possible:
    both of which count as a component), collects that component's string-typed
    `useState` dispatchers, and dispatches into each in turn (re-checking the
    value across a few frames) until the input's value actually becomes the code,
-   then fires a native `submit` event that React intercepts. Three properties
+   then fires a native `submit` event (on the form the input belongs to —
+   `inp.form`, not the first `<form>` on the page, so a distractor form ahead of
+   the real one isn't the one submitted) that React intercepts. Three properties
    matter here:
    - It stops at the input's own component and never ascends into ancestors. A
      parent such as the SPA router holds its current path in a string `useState`
@@ -151,7 +153,7 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   fails the run instead of being masked by the valueTracker fallback. The
   session encoding is implemented independently in the mock (not imported from
   `session.ts`) so the solver's crypto is checked against a second
-  implementation rather than against itself. Seven test-only knobs, read once
+  implementation rather than against itself. Eight test-only knobs, read once
   from the initial page URL's query string (the solver navigates by pushState
   afterwards, so the query is captured at module load), let a test opt into a
   failure mode without disturbing the default happy path: `?codes=N` generates
@@ -163,13 +165,16 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   misses on the input's own component, `?uncontrolled=N` renders step N's
   input as an uncontrolled element in a component with no string `useState`, so
   the fiber walk finds no candidate and the solver must use the valueTracker
-  fallback, and `?forwardref=N` wraps step N's component in `React.forwardRef`
+  fallback, `?forwardref=N` wraps step N's component in `React.forwardRef`
   so the input's owning fiber has an object `type` instead of a function, which
   the walk must still recognise as a component boundary or it walks into the
-  router. Each knob defaults off, so the other scenarios are untouched.
+  router, and `?distractor=N` renders a decoy `<form>` ahead of step N's real
+  one so the first form on the page is no longer the code form (the solver must
+  submit the form its code input belongs to). Each knob defaults off, so the
+  other scenarios are untouched.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract over ten scenarios:
+  observable contract over eleven scenarios:
   - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
   - the site gone (404) — exit 1 with the fail-fast goto message;
   - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
@@ -223,6 +228,17 @@ The original deployment is gone (HTTP 404 since mid-2026), so
     only pass via the fiber path. Teeth: dropping the forwardRef branch from the
     component check makes step 23 dispatch into the router and the run fails with
     "no form to submit" / "no code input found".
+  - distractor form (`?distractor=24`) — a decoy `<form>` (a search box) is
+    rendered ahead of step 24's real code form, so `document.querySelector("form")`
+    returns the decoy. A solver that submits the first form on the page submits
+    the decoy, whose onSubmit does nothing, so step 24 never advances (and every
+    later step is then stuck on `/step24`). The solver instead submits the form
+    its code input belongs to (`inp.form`) and the run completes. Step 24 is
+    strict, so the value still comes from the fiber dispatch; the distractor only
+    changes which form is submitted, and the code selector still picks the real
+    input (the decoy's "Search" placeholder has no "code" in it). Teeth: reverting
+    the submit target to `document.querySelector("form")` makes step 24 submit the
+    decoy, stick, and the run FAIL.
   - fallback diagnostic (`?uncontrolled=30&broken=30`) — step 30 is an
     uncontrolled input that also rejects every code. Steps 1-29 pass; step 30
     fills via the fallback but never validates, so the run FAILs and the FAILED

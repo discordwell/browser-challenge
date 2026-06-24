@@ -329,6 +329,37 @@ test(
 );
 
 test(
+  "solver submits the code input's own form, not a distractor form ahead of it",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?distractor=24 renders a decoy <form> (a search box) AHEAD of step 24's
+      // real code form. document.querySelector("form") returns the first form —
+      // the decoy — whose onSubmit does nothing, so a solver that submits "the
+      // first form on the page" submits the decoy and step 24 never advances
+      // (then every later step is stuck on /step24 too). The solver instead
+      // submits the form its code input actually belongs to (`inp.form`), so the
+      // run completes. Step 24 is strict (≥19), so the value is set via the fiber
+      // dispatch; the distractor only changes which form gets submitted, and the
+      // code selector still picks the real input (the decoy's "Search" placeholder
+      // has no "code" in it). Teeth: reverting the submit target to
+      // document.querySelector("form") makes step 24 submit the decoy, stick, and
+      // the run FAIL with a non-zero exit.
+      const run = await runSolver(`${mock.url}/?distractor=24`);
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 0, `expected exit code 0${detail}`);
+      assert.match(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(run.stdout, /Final URL: .*\/finish/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /FAILED/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);
+
+test(
   "solver's failure diagnostic reports the valueTracker fallback when an uncontrolled input is rejected",
   { timeout: 120_000 },
   async () => {

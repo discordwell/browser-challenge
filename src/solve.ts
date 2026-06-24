@@ -167,8 +167,14 @@ async function solveAll(browser: Browser, totalStart: number) {
         }
       }
 
-      // Submit via native form event (React intercepts this)
-      const form = document.querySelector("form");
+      // Submit via a native form event (React intercepts this). Submit the form
+      // the code input actually belongs to (`inp.form`), not the first <form> on
+      // the page: the real challenge is littered with distractor widgets, so a
+      // decoy form ahead of the real one would otherwise be the one we submit —
+      // it would swallow the event and the step would never advance. This mirrors
+      // the precision already applied to finding the input itself. Fall back to
+      // the first form only if the input somehow isn't associated with one.
+      const form = inp.form ?? document.querySelector("form");
       if (!form) return { ok: false, reason: "no form to submit", method, applied };
       form.dispatchEvent(
         new Event("submit", { bubbles: true, cancelable: true })

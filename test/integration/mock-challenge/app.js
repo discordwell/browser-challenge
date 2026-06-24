@@ -89,6 +89,14 @@ const UNCONTROLLED_STEP = Number(KNOBS.get("uncontrolled")) || 0;
 // `typeof === "function"` check already stops there. forwardRef is the case it
 // doesn't catch.) 0 = none.
 const FORWARDREF_STEP = Number(KNOBS.get("forwardref")) || 0;
+// A step that renders a DECOY <form> *ahead of* the real code form, standing in
+// for the real challenge's distractor widgets (newsletter/search forms, etc.).
+// The decoy holds no code input and its onSubmit does nothing, so submitting it
+// never navigates. Because it is rendered first, document.querySelector("form")
+// returns the decoy — so a solver that submits "the first form on the page"
+// submits the decoy and the step never advances. The solver must instead submit
+// the form its code input actually belongs to (`inp.form`). 0 = no distractor.
+const DISTRACTOR_STEP = Number(KNOBS.get("distractor")) || 0;
 
 function xor(text) {
   let out = "";
@@ -228,6 +236,19 @@ function StepPage({ step, navigate }) {
     "main",
     null,
     e("h1", null, "Step " + step + " of " + STEP_COUNT),
+    // A decoy form rendered AHEAD of the real one on the distractor step, so
+    // document.querySelector("form") (the first form) returns this one. It has no
+    // code input and its onSubmit does nothing, so submitting it never advances —
+    // the solver must submit the form its code input belongs to instead. Its
+    // "Search" input also has no "code" in its placeholder, so the code selector
+    // still picks the real input. `false` on every other step renders nothing.
+    step === DISTRACTOR_STEP &&
+      e(
+        "form",
+        { onSubmit: (ev) => ev.preventDefault() },
+        e("input", { placeholder: "Search the site" }),
+        e("button", { type: "submit" }, "Search"),
+      ),
     e(
       "form",
       { onSubmit },

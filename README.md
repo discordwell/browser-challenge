@@ -46,7 +46,10 @@ the value check misses, an uncontrolled input with no string `useState`
 (the only shape that exercises the valueTracker fallback — and another guard
 that the scoped walk never reaches the router), a `forwardRef`-wrapped input
 component (whose owning fiber has an object type, not a function — the walk has
-to recognise it as a component boundary or it walks into the router), and a
+to recognise it as a component boundary or it walks into the router), a decoy
+`<form>` rendered ahead of the real one (the solver has to submit the form its
+code input belongs to, not the first form on the page, or it submits the decoy
+and the step never advances), and a
 genuinely unpassable step — the run reports it as `FAILED`, lists it under
 "Steps that never confirmed", and exits non-zero rather than printing a false
 `COMPLETE`. It needs the Playwright Chromium build
@@ -92,7 +95,7 @@ The dispatch result records whether the code actually stuck (`applied`), so a st
 
 ### 3. Native Form Submit
 
-After dispatching the code, we fire a native `submit` event on the form element. React intercepts this and processes it through its event system, triggering the validation and navigation.
+After dispatching the code, we fire a native `submit` event on the form element. React intercepts this and processes it through its event system, triggering the validation and navigation. We submit the form the code input actually belongs to (`inp.form`), not the first `<form>` on the page — the real challenge is littered with distractor widgets, so a decoy form ahead of the real one would otherwise swallow the event and the step would never advance. This is the same precision the input selector and the fiber walk already apply, carried through to the submit.
 
 ### 4. Step 30 Edge Case
 
