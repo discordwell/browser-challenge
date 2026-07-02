@@ -15,14 +15,20 @@ npm install
 npm run solve        # or: npx tsx src/solve.ts
 ```
 
-Override the target or run headless with env vars:
+Override the target, run headless, or tune the per-step navigation timeout with
+env vars:
 
 ```bash
-CHALLENGE_URL=https://example.com HEADLESS=1 npm run solve
+CHALLENGE_URL=https://example.com HEADLESS=1 STEP_TIMEOUT_MS=3000 npm run solve
 ```
 
 The process exits non-zero if the run does not end on the finish page, so it
-can be scripted/CI'd.
+can be scripted/CI'd. If a step genuinely stalls — the URL stops advancing
+across two consecutive steps, e.g. the codes no longer validate — the solver
+aborts the loop rather than grinding every remaining step through its full
+`STEP_TIMEOUT_MS` retry budget on the wrong page, so a broken run reports
+`FAILED` in seconds instead of minutes. (A step that navigated just after its
+timeout still counts as progress, so a single slow step never trips the abort.)
 
 ### Development
 
@@ -52,8 +58,10 @@ code input belongs to, not the first form on the page, or it submits the decoy
 and the step never advances), and a
 genuinely unpassable step — the run reports it as `FAILED`, lists it under
 "Steps that never confirmed", and exits non-zero rather than printing a false
-`COMPLETE`. It needs the Playwright Chromium build
-(`npx playwright install chromium`).
+`COMPLETE` — and a genuine cascade (an *early* step that stalls), where the
+solver aborts the loop after two consecutive non-advancing steps instead of
+grinding all the way to step 30 on the wrong page. It needs the Playwright
+Chromium build (`npx playwright install chromium`).
 
 Everything runs in CI on pushes to `main` and on pull requests
 (`.github/workflows/ci.yml`); the unit-test job is pure Node and needs no

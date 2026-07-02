@@ -28,6 +28,26 @@ const CHALLENGE_URL =
 const HEADLESS = /^(1|true)$/i.test(process.env.HEADLESS ?? "");
 
 /**
+ * Per-step navigation timeout in milliseconds — each of the two `waitForURL`
+ * waits in {@link submitStep}. Override with STEP_TIMEOUT_MS; defaults to 3000.
+ * Lower it to make a stuck run fail faster (the integration tests do this);
+ * raise it for a slow network or deployment. A non-numeric (e.g. unset →
+ * `Number(undefined)` is `NaN`) or zero value falls back to the default.
+ */
+const STEP_TIMEOUT_MS = Number(process.env.STEP_TIMEOUT_MS) || 3000;
+
+/**
+ * Abort the step loop after this many consecutive steps fail to change the URL.
+ * Once a submitted code can't get us off the current page, every remaining step
+ * just burns its full {@link STEP_TIMEOUT_MS} retry budget on the wrong page
+ * (~STEP_COUNT × that for an early stall). Two, not one: a step can be reported
+ * unconfirmed yet still have navigated just after its timeout — that step leaves
+ * the URL *advanced*, so it never counts toward the stall. Two consecutive steps
+ * with the URL unchanged is a genuine cascade, not a late navigation.
+ */
+const MAX_STUCK_STEPS = 2;
+
+/**
  * Selector for the challenge's code input. Defined once and shared between the
  * in-browser dispatch helper (`document.querySelector`) and the Playwright
  * `waitForSelector` below, so the two can never drift apart — and that drift
@@ -246,8 +266,17 @@ async function solveAll(browser: Browser, totalStart: number) {
     { sentinel: SENTINEL_CODE, stepCount: STEP_COUNT }
   );
 
-  // Solve all 30 steps
+  // Solve all 30 steps, aborting early if we genuinely stall. The abort keys on
+  // the URL not advancing across MAX_STUCK_STEPS consecutive steps — NOT on
+  // submitStep returning unconfirmed: a step can be reported unconfirmed yet have
+  // navigated just after its timeout, and that leaves the URL advanced, which
+  // must count as progress (otherwise a run that was really fine would abort).
+  // Once the URL truly stops moving, no submitted code is getting us off this
+  // page, so every remaining step would only burn its retry budget on the wrong
+  // one (see MAX_STUCK_STEPS) — bail and let the final-URL verdict report FAILED.
   const failedSteps: number[] = [];
+  let prevUrl = page.url();
+  let stuckSteps = 0;
   for (let step = 1; step <= STEP_COUNT; step++) {
     const stepStart = performance.now();
     // The correct submission for step N is codes[N] — see codeForStep in session.ts.
@@ -260,8 +289,19 @@ async function solveAll(browser: Browser, totalStart: number) {
     );
     if (!confirmed) failedSteps.push(step);
 
+    const url = page.url();
     const elapsed = ((performance.now() - stepStart) / 1000).toFixed(2);
-    console.log(`Step ${step}: ${elapsed}s → ${page.url().split("/").pop()}`);
+    console.log(`Step ${step}: ${elapsed}s → ${url.split("/").pop()}`);
+
+    stuckSteps = url === prevUrl ? stuckSteps + 1 : 0;
+    prevUrl = url;
+    if (stuckSteps >= MAX_STUCK_STEPS) {
+      console.error(
+        `Aborting: no navigation across ${stuckSteps} consecutive steps ` +
+          `(stuck at ${url}) — remaining steps cannot advance from here.`
+      );
+      break;
+    }
   }
 
   const totalTime = ((performance.now() - totalStart) / 1000).toFixed(2);
@@ -320,12 +360,12 @@ async function submitStep(
 
   // Wait for navigation; retry the dispatch once if the URL hasn't advanced.
   try {
-    await page.waitForURL(nextPattern, { timeout: 3000 });
+    await page.waitForURL(nextPattern, { timeout: STEP_TIMEOUT_MS });
   } catch {
     if (nextPattern.test(page.url())) return true;
     lastResult = await dispatchOnce(page, step, code);
     try {
-      await page.waitForURL(nextPattern, { timeout: 3000 });
+      await page.waitForURL(nextPattern, { timeout: STEP_TIMEOUT_MS });
     } catch (retryErr) {
       if (!isNavigationError(retryErr)) {
         console.warn(`  Step ${step} retry: ${truncate(errorMessage(retryErr))}`);

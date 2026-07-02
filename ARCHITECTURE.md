@@ -126,6 +126,7 @@ START click → /step1
   page.evaluate: patch Map.prototype.get             (browser)
   for step 1..STEP_COUNT:
     wait for input → __dispatchAndSubmit(codeForStep(codes, step)) → wait for next URL
+    abort the loop if the URL hasn't advanced across MAX_STUCK_STEPS steps
 → /finish
 ```
 
@@ -133,6 +134,17 @@ The finish page is only reachable by passing every step, so the final URL is
 the ground truth for success: the process exits non-zero if the run does not
 end on `/finish` (or if anything throws — the browser is closed via
 `try/finally` either way).
+
+The per-step navigation wait is `STEP_TIMEOUT_MS` (default 3000, env-overridable)
+applied twice per step (the initial submit and one retry). If the URL fails to
+advance across `MAX_STUCK_STEPS` (2) consecutive steps the loop aborts early:
+once a submitted code can't move us off the current page, every remaining step
+would only burn its retry budget on the wrong page (~`STEP_COUNT` × the timeout
+for an early stall), so the run reports `FAILED` in seconds instead of minutes.
+The abort keys on the URL not advancing rather than on a step being reported
+unconfirmed: a step can time out yet still have navigated a moment later, and
+that leaves the URL advanced — counted as progress — so a single slow step never
+trips the abort, only a genuine stall does.
 
 The cipher runs in Node (not the browser) specifically so it is the same code
 path the unit tests exercise. The browser is used only to read and write the raw
@@ -174,7 +186,7 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   other scenarios are untouched.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract over eleven scenarios:
+  observable contract over twelve scenarios:
   - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
   - the site gone (404) — exit 1 with the fail-fast goto message;
   - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
@@ -193,6 +205,16 @@ The original deployment is gone (HTTP 404 since mid-2026), so
     step 30 is strict, so this proves the failure is the site rejecting a set
     code, not the solver failing to set the input. That is the distinction
     `describeDispatch` exists to surface when the challenge is redeployed.
+  - a genuine cascade (`?broken=2`, `STEP_TIMEOUT_MS=500`) — step 2 rejects every
+    code, so once step 1 advances to `/step2` the run stalls there: step 2 sticks
+    and step 3 (run from `/step2`) sticks too. Two consecutive non-advancing
+    steps trip the early-abort, so the loop stops before step 4 instead of
+    grinding 4..30 on the wrong page. Asserts exit 1, `=== FAILED ===`, the
+    `Aborting: no navigation across 2 consecutive steps` line, "Steps that never
+    confirmed: 2, 3" (not 2..30), and — the teeth — that "Step 4" never appears.
+    Without the abort the loop runs all 30 steps; the absent "Step 4" is the
+    proof it fired. (Where `?broken=30` breaks the *last* step so the abort never
+    fires, this breaks an *early* one so it must.)
   - hook reordering (`?decoy=25`) — step 25 has a string `useState` ahead of the
     code state, so a solver that dispatched into the first string state would
     send the code to the wrong place and fail. The run still completes (exit 0,
@@ -258,7 +280,7 @@ The original deployment is gone (HTTP 404 since mid-2026), so
 
 ```bash
 npm install
-npm run solve            # run the solver (CHALLENGE_URL and HEADLESS env vars override defaults)
+npm run solve            # run the solver (CHALLENGE_URL, HEADLESS, STEP_TIMEOUT_MS env vars override defaults)
 npm test                 # unit tests for session.ts
 npm run test:integration # solver CLI vs the local mock challenge (needs Chromium installed)
 npm run typecheck        # tsc --noEmit over src/ and test/

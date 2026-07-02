@@ -29,10 +29,13 @@ interface SolverRun {
  * not an in-process import — so the test exercises the same entry point,
  * env handling, and exit code a user or CI script sees.
  */
-async function runSolver(challengeUrl: string): Promise<SolverRun> {
+async function runSolver(
+  challengeUrl: string,
+  extraEnv: Record<string, string> = {},
+): Promise<SolverRun> {
   const child = spawn(process.execPath, ["--import", "tsx", "src/solve.ts"], {
     cwd: REPO_ROOT,
-    env: { ...process.env, CHALLENGE_URL: challengeUrl, HEADLESS: "1" },
+    env: { ...process.env, CHALLENGE_URL: challengeUrl, HEADLESS: "1", ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -165,14 +168,17 @@ test(
     try {
       // ?broken=30 makes step 30 reject every code — a step the solver cannot
       // pass, as if the challenge changed so the extracted code no longer
-      // validates. Steps 1-29 still pass, isolating the failure to one step
-      // (and keeping the run to one stuck step's ~6s of retry timeouts). This
-      // pins the project's core "truthful outcomes" contract end-to-end: when
-      // the run does not reach /finish it must say so and exit non-zero, never
-      // a false COMPLETE. The other failure tests fail *before* the step loop
-      // (404, malformed session); this is the only one that drives the loop to
-      // a genuine FAILED.
-      const run = await runSolver(`${mock.url}/?broken=30`);
+      // validates. Steps 1-29 still pass, isolating the failure to the *last*
+      // step (so the cascade-abort never fires — see the ?broken=2 test for that
+      // — and the run only spends one stuck step's retry budget, here ~1s with
+      // STEP_TIMEOUT_MS=500). This pins the project's core "truthful outcomes"
+      // contract end-to-end: when the run does not reach /finish it must say so
+      // and exit non-zero, never a false COMPLETE. The other failure tests fail
+      // *before* the step loop (404, malformed session); this is the only one
+      // that drives the loop to a genuine FAILED.
+      const run = await runSolver(`${mock.url}/?broken=30`, {
+        STEP_TIMEOUT_MS: "500",
+      });
       const detail = transcript(run);
 
       assert.equal(run.exitCode, 1, `expected exit code 1${detail}`);
@@ -186,6 +192,52 @@ test(
       // failing to set the input. That distinction is the whole point of
       // surfacing the dispatch method on a redeployed challenge.
       assert.match(run.stderr, /set via React fiber/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);
+
+test(
+  "solver aborts a genuine cascade instead of grinding through every remaining step",
+  { timeout: 60_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?broken=2 makes step 2 reject every code. Step 1 passes (so the URL
+      // advances to /step2 — proving a real advance resets the stall counter),
+      // then step 2 sticks, and step 3 — run from /step2, since step 2 never
+      // navigated — sticks too. Two consecutive steps with no URL change is a
+      // genuine stall (no submitted code gets us off /step2), so the solver
+      // aborts rather than burning steps 4..30's retry budgets on the wrong page.
+      // STEP_TIMEOUT_MS is dropped to 500ms so the two stuck steps' waits don't
+      // slow the test (and to exercise that env override end-to-end).
+      const run = await runSolver(`${mock.url}/?broken=2`, {
+        STEP_TIMEOUT_MS: "500",
+      });
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 1, `expected exit code 1${detail}`);
+      assert.match(run.stdout, /=== FAILED ===/, detail);
+      assert.doesNotMatch(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(
+        run.stderr,
+        /Aborting: no navigation across 2 consecutive steps/,
+        detail,
+      );
+      // Teeth: only steps 1-3 are attempted; the abort stops the loop before
+      // step 4. Without the early-abort the loop grinds through all 30 steps and
+      // "Step 4:" appears (and "Steps that never confirmed" lists 2..30). The
+      // absence of "Step 4" is the proof the abort fired, not a slow timeout.
+      assert.match(run.stdout, /Step 3:/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /Step 4/, detail);
+      // The steps it attempted and that never confirmed are exactly 2 and 3 —
+      // not a wall of 2..30. The negative lookahead pins the list to end at 3.
+      assert.match(
+        run.stderr,
+        /Steps that never confirmed: 2, 3(?!,)/,
+        detail,
+      );
     } finally {
       await mock.close();
     }
@@ -376,7 +428,9 @@ test(
       // component into the router, step 30 dispatches the code as a route and
       // the diagnostic is "no form to submit" instead — the assertion below
       // only holds with the scoped walk + reachable fallback.
-      const run = await runSolver(`${mock.url}/?uncontrolled=30&broken=30`);
+      const run = await runSolver(`${mock.url}/?uncontrolled=30&broken=30`, {
+        STEP_TIMEOUT_MS: "500",
+      });
       const detail = transcript(run);
 
       assert.equal(run.exitCode, 1, `expected exit code 1${detail}`);
