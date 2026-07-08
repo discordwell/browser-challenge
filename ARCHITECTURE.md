@@ -191,7 +191,7 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   off, so the other scenarios are untouched.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract over thirteen scenarios:
+  observable contract over fourteen scenarios:
   - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
   - the site gone (404) — exit 1 with the fail-fast goto message;
   - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
@@ -270,12 +270,29 @@ The original deployment is gone (HTTP 404 since mid-2026), so
     uncontrolled input that also rejects every code. Steps 1-29 pass; step 30
     fills via the fallback but never validates, so the run FAILs and the FAILED
     line must report the value was "set via valueTracker fallback" (method
-    "fallback", `applied` true). This pins `describeDispatch`'s last unexercised
+    "fallback", `applied` true). This pins `describeDispatch`'s fallback-applied
     branch end-to-end — proving the fallback both ran and actually filled the
     input, not that the solver failed to set it. (The uncontrolled step holds no
     `useState` at all — only a `useRef` — so the component can never own a
     string-typed state and the reported method can't drift to `fiber` on a
     retry; its broken submit simply swallows without navigating.)
+  - plumbing-vs-code triage (`?mismatch=30&broken=30`) — step 30 is strict
+    (exactly as in the `?broken=30` test) *and* its displayed value never equals
+    its `code` state, so the fiber dispatch runs but the solver's
+    value-took-the-code check always misses (`applied` false); `broken` then
+    rejects the submit so the run FAILs there. This pins the remaining
+    `describeDispatch` method-branch end-to-end — `{ method: "fiber", applied:
+    false }` → "dispatched via fiber but the input never took the code — …
+    hook reordering … or the code selector changed". That is the most
+    consequential redeploy triage signal: the code was dispatched but the input
+    never took it (fix the fiber walk / selector), *not* the site rejecting a
+    code it did receive (change the codes). Teeth: the *only* difference from the
+    `?broken=30` test is `mismatch` flipping `applied` to false, so the FAILED
+    line must NOT say "set via React fiber" — the same strict broken step
+    yielding a different diagnostic proves `applied` drives the real end-to-end
+    output, not just the `diagnostics.test.ts` unit test. (Sabotage-verified:
+    making `describeDispatch` ignore `applied` reverts the line to "code set via
+    React fiber dispatch" and fails the assertion.)
   - unfindable input (`?renamed=2`, `STEP_TIMEOUT_MS=500`) — step 2's input
     placeholder loses the word "code", as a redeploy that renames the input
     would, so the code-input selector matches nothing. The solver never even

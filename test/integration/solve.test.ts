@@ -420,10 +420,12 @@ test(
       // ?uncontrolled=30&broken=30 makes step 30 an uncontrolled input that
       // rejects every code. Steps 1-29 pass; step 30 fills via the fallback
       // (no fiber string state) but never validates, so the run FAILs. This
-      // pins the last unexercised branch of describeDispatch end-to-end: the
+      // pins the fallback-applied branch of describeDispatch end-to-end: the
       // FAILED line must report the value was "set via valueTracker fallback"
       // (method "fallback", applied true) — proving the fallback both ran and
-      // actually filled the input, not that the solver failed to set it.
+      // actually filled the input, not that the solver failed to set it. (The
+      // sibling test below pins the remaining method-branch: fiber, applied
+      // false — "dispatched but the input never took the code".)
       // Teeth: against a solver whose walk ascends past the stateless input
       // component into the router, step 30 dispatches the code as a route and
       // the diagnostic is "no form to submit" instead — the assertion below
@@ -439,6 +441,51 @@ test(
       assert.match(run.stderr, /Step 30: FAILED/, detail);
       assert.match(run.stderr, /Steps that never confirmed: 30/, detail);
       assert.match(run.stderr, /set via valueTracker fallback/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);
+
+test(
+  "solver's failure diagnostic distinguishes 'input never took the code' from a rejected code",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?mismatch=30&broken=30 combines two knobs on the last step: `broken`
+      // makes step 30 reject every submit (so the run FAILs there, no cascade —
+      // see the ?broken=30 test), and `mismatch` makes its displayed value never
+      // equal the `code` state, so the solver's "did the input take the code?"
+      // check always *misses* (applied = false) even though the fiber dispatch
+      // ran. This pins the one describeDispatch branch the other diagnostic tests
+      // never reach end-to-end: `{ method: "fiber", applied: false }`. It is the
+      // most consequential triage signal on a redeployed challenge — "the code
+      // dispatched but the input never took it", i.e. the fiber walk or the
+      // selector needs updating (plumbing), NOT "the site rejected a code it did
+      // receive" (a code/format change). Getting these two backwards sends a
+      // debugger down the wrong path, which is the whole reason `applied` exists.
+      const run = await runSolver(`${mock.url}/?mismatch=30&broken=30`, {
+        STEP_TIMEOUT_MS: "500",
+      });
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 1, `expected exit code 1${detail}`);
+      assert.match(run.stdout, /=== FAILED ===/, detail);
+      assert.doesNotMatch(run.stdout, /=== COMPLETE ===/, detail);
+      assert.match(run.stderr, /Step 30: FAILED/, detail);
+      assert.match(run.stderr, /Steps that never confirmed: 30/, detail);
+      // The crux: the FAILED line reports the input never took the code and
+      // points at the plumbing (hook reordering / the selector), not the codes.
+      assert.match(run.stderr, /never took the code/, detail);
+      assert.match(run.stderr, /hook reordering|selector/, detail);
+      // Teeth: step 30 is strict here too, exactly as in the ?broken=30 test —
+      // the *only* difference is `mismatch` flipping `applied` to false. So this
+      // must NOT report "set via React fiber" (the applied-true message that test
+      // asserts). That the same strict broken step yields a different diagnostic
+      // proves `applied` genuinely drives the real end-to-end output, not just
+      // the unit test in diagnostics.test.ts.
+      assert.doesNotMatch(run.stderr, /set via React fiber/, detail);
     } finally {
       await mock.close();
     }

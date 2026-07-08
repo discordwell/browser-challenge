@@ -65,7 +65,9 @@ FAILED line, the triage signal that the *selector* needs updating, then aborts
 once genuinely stalled), and a
 genuinely unpassable step — the run reports it as `FAILED`, lists it under
 "Steps that never confirmed", and exits non-zero rather than printing a false
-`COMPLETE` — and a genuine cascade (an *early* step that stalls), where the
+`COMPLETE`, its diagnostic line separating a code the site *rejected* (which
+was set fine — change the codes) from one the input *never took* (change the
+fiber walk or selector) — and a genuine cascade (an *early* step that stalls), where the
 solver aborts the loop after two consecutive non-advancing steps instead of
 grinding all the way to step 30 on the wrong page. The suite also smoke-tests
 `npm run demo` end-to-end, so the one runnable showcase left can't rot
