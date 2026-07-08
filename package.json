@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "solve": "tsx src/solve.ts",
+    "demo": "tsx scripts/demo.ts",
     "test": "tsx --test test/*.test.ts",
     "test:integration": "tsx --test test/integration/*.test.ts",
     "typecheck": "tsc --noEmit"

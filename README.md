@@ -4,15 +4,18 @@ Solves all 30 steps of the [Browser Navigation Challenge](https://serene-frangip
 
 > **Status (June 2026):** the original Netlify deployment currently returns
 > HTTP 404. The solver detects this and fails fast with a clear error; point
-> `CHALLENGE_URL` at a live deployment of the challenge to run it. The solver
-> itself stays verifiable end-to-end against a local mock of the challenge —
+> `CHALLENGE_URL` at a live deployment of the challenge to run it, or run
+> `npm run demo` to watch it beat the bundled local replica. The solver
+> itself stays verifiable end-to-end against that replica —
 > see `npm run test:integration` below.
 
 ## Quick Start
 
 ```bash
 npm install
-npm run solve        # or: npx tsx src/solve.ts
+npx playwright install chromium   # once, for the browser build
+npm run demo         # serve the bundled replica locally and watch the solver beat it
+npm run solve        # run against a live deployment (see Status note above)
 ```
 
 Override the target, run headless, or tune the per-step navigation timeout with
@@ -34,7 +37,7 @@ timeout still counts as progress, so a single slow step never trips the abort.)
 
 ```bash
 npm test                 # unit tests for the session crypto / index logic
-npm run typecheck        # tsc --noEmit over src/ and test/
+npm run typecheck        # tsc --noEmit over src/, test/, and scripts/
 npm run test:integration # the real solver CLI vs a local mock challenge
 ```
 
@@ -55,12 +58,18 @@ component (whose owning fiber has an object type, not a function — the walk ha
 to recognise it as a component boundary or it walks into the router), a decoy
 `<form>` rendered ahead of the real one (the solver has to submit the form its
 code input belongs to, not the first form on the page, or it submits the decoy
-and the step never advances), and a
+and the step never advances), a code input the selector can no longer find
+(the placeholder loses the word "code", as a redeploy might rename it — the
+run reports `no code input found` on both the per-attempt log and the step's
+FAILED line, the triage signal that the *selector* needs updating, then aborts
+once genuinely stalled), and a
 genuinely unpassable step — the run reports it as `FAILED`, lists it under
 "Steps that never confirmed", and exits non-zero rather than printing a false
 `COMPLETE` — and a genuine cascade (an *early* step that stalls), where the
 solver aborts the loop after two consecutive non-advancing steps instead of
-grinding all the way to step 30 on the wrong page. It needs the Playwright
+grinding all the way to step 30 on the wrong page. The suite also smoke-tests
+`npm run demo` end-to-end, so the one runnable showcase left can't rot
+silently. It needs the Playwright
 Chromium build (`npx playwright install chromium`).
 
 Everything runs in CI on pushes to `main` and on pull requests
@@ -144,7 +153,10 @@ test/
   diagnostics.test.ts  # Unit tests for diagnostics.ts (node:test)
   integration/
     solve.test.ts   # Runs the real solver CLI against the mock challenge
+    demo.test.ts    # Smoke-tests `npm run demo` end-to-end
     mock-challenge/ # Local React 18 replica of the challenge's contract
+scripts/
+  demo.ts           # npm run demo: serve the replica locally, run the solver at it
 ```
 
 The browser glue stays in one file (`solve.ts`); only the pure, easily-mistaken

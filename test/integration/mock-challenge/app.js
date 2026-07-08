@@ -97,6 +97,15 @@ const FORWARDREF_STEP = Number(KNOBS.get("forwardref")) || 0;
 // submits the decoy and the step never advances. The solver must instead submit
 // the form its code input actually belongs to (`inp.form`). 0 = no distractor.
 const DISTRACTOR_STEP = Number(KNOBS.get("distractor")) || 0;
+// A step whose input placeholder loses the word "code" ("Enter the answer"),
+// standing in for a redeploy that renames the input so the solver's code-input
+// selector (input[placeholder*="code" i]) no longer matches ANY element. The
+// input still exists and the step is still passable by a human — the solver
+// just can't identify it. Exercises the solver's "no code input found" path
+// end-to-end: the per-attempt log, the FAILED diagnostic (the third triage
+// branch — neither "site rejected a set code" nor "input never took it"), and
+// the stall-abort once the run can't advance. 0 = no renamed step.
+const RENAMED_STEP = Number(KNOBS.get("renamed")) || 0;
 
 function xor(text) {
   let out = "";
@@ -253,7 +262,9 @@ function StepPage({ step, navigate }) {
       "form",
       { onSubmit },
       e("input", {
-        placeholder: "Enter code",
+        // On the renamed step the placeholder has no "code" in it, so the
+        // solver's selector can't find this input — see RENAMED_STEP.
+        placeholder: step === RENAMED_STEP ? "Enter the answer" : "Enter code",
         // On the mismatch step the displayed value never equals `code` (a
         // trailing space is appended once a code is set), so the solver's
         // value-took-the-code check always misses — see MISMATCH_STEP. `code`

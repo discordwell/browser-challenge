@@ -444,3 +444,52 @@ test(
     }
   },
 );
+
+test(
+  "solver reports 'no code input found' when the input's placeholder no longer matches",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    try {
+      // ?renamed=2 renames step 2's input placeholder to "Enter the answer" —
+      // a stand-in for a redeploy that renames the input so the code-input
+      // selector matches nothing on the page. This is the one dispatch outcome
+      // ({ ok: false, reason: "no code input found" }) never driven end-to-end
+      // by the other scenarios, and the third branch of the failure triage:
+      // not "the site rejected a set code", not "the input never took it", but
+      // "no input could be identified at all" — the signal that the selector
+      // itself needs updating. Step 1 passes; step 2 sticks (the solver never
+      // even submits, so the URL can't advance); step 3, run from /step2,
+      // sticks the same way; two consecutive non-advancing steps trip the
+      // stall-abort. The missing input also exercises submitStep's
+      // waitForSelector-timeout path, which every other scenario skips.
+      // STEP_TIMEOUT_MS=500 keeps the two stuck steps' waits short.
+      const run = await runSolver(`${mock.url}/?renamed=2`, {
+        STEP_TIMEOUT_MS: "500",
+      });
+      const detail = transcript(run);
+
+      assert.equal(run.exitCode, 1, `expected exit code 1${detail}`);
+      assert.match(run.stdout, /=== FAILED ===/, detail);
+      assert.doesNotMatch(run.stdout, /=== COMPLETE ===/, detail);
+      // The per-attempt log from dispatchOnce…
+      assert.match(run.stderr, /Step 2: no code input found/, detail);
+      // …and the same reason carried into the step's FAILED diagnostic line.
+      assert.match(
+        run.stderr,
+        /Step 2: FAILED at .*\/step2 — no code input found/,
+        detail,
+      );
+      // Never advancing is a genuine stall: the abort must fire before step 4.
+      assert.match(
+        run.stderr,
+        /Aborting: no navigation across 2 consecutive steps/,
+        detail,
+      );
+      assert.match(run.stderr, /Steps that never confirmed: 2, 3(?!,)/, detail);
+      assert.doesNotMatch(run.stdout + run.stderr, /Step 4/, detail);
+    } finally {
+      await mock.close();
+    }
+  },
+);

@@ -17,10 +17,13 @@ test/
   diagnostics.test.ts  # Unit tests for diagnostics.ts (node:test).
   integration/
     solve.test.ts      # End-to-end: spawns the real solver CLI, asserts the exit-code contract.
+    demo.test.ts       # Smoke: `npm run demo` must drive the solver to COMPLETE against the replica.
     mock-challenge/
       app.js           # React 18 replica of the challenge's contract (plain JS, no bundler).
       index.html       # Shell that loads the React UMD builds + app.js.
       server.ts        # node:http server: UMD from node_modules, SPA catch-all to index.html.
+scripts/
+  demo.ts              # `npm run demo`: serve the replica on an ephemeral port, run the solver at it.
 ```
 
 `session.ts`, `navigation.ts`, and `diagnostics.ts` hold everything that can be
@@ -165,7 +168,7 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   fails the run instead of being masked by the valueTracker fallback. The
   session encoding is implemented independently in the mock (not imported from
   `session.ts`) so the solver's crypto is checked against a second
-  implementation rather than against itself. Eight test-only knobs, read once
+  implementation rather than against itself. Nine test-only knobs, read once
   from the initial page URL's query string (the solver navigates by pushState
   afterwards, so the query is captured at module load), let a test opt into a
   failure mode without disturbing the default happy path: `?codes=N` generates
@@ -180,13 +183,15 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   fallback, `?forwardref=N` wraps step N's component in `React.forwardRef`
   so the input's owning fiber has an object `type` instead of a function, which
   the walk must still recognise as a component boundary or it walks into the
-  router, and `?distractor=N` renders a decoy `<form>` ahead of step N's real
+  router, `?distractor=N` renders a decoy `<form>` ahead of step N's real
   one so the first form on the page is no longer the code form (the solver must
-  submit the form its code input belongs to). Each knob defaults off, so the
-  other scenarios are untouched.
+  submit the form its code input belongs to), and `?renamed=N` renames step N's
+  input placeholder so the code-input selector matches nothing on the page (the
+  input still exists; the solver just can't identify it). Each knob defaults
+  off, so the other scenarios are untouched.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract over twelve scenarios:
+  observable contract over thirteen scenarios:
   - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
   - the site gone (404) — exit 1 with the fail-fast goto message;
   - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
@@ -271,6 +276,23 @@ The original deployment is gone (HTTP 404 since mid-2026), so
     `useState` at all — only a `useRef` — so the component can never own a
     string-typed state and the reported method can't drift to `fiber` on a
     retry; its broken submit simply swallows without navigating.)
+  - unfindable input (`?renamed=2`, `STEP_TIMEOUT_MS=500`) — step 2's input
+    placeholder loses the word "code", as a redeploy that renames the input
+    would, so the code-input selector matches nothing. The solver never even
+    submits, so the URL can't advance: step 2 sticks, step 3 (run from `/step2`)
+    sticks too, and the stall-abort fires before step 4. Asserts exit 1,
+    `=== FAILED ===`, the per-attempt "no code input found" log, the *same*
+    reason on the step's FAILED diagnostic line, and "Steps that never
+    confirmed: 2, 3". This is the third triage branch end-to-end — not "the
+    site rejected a set code", not "the input never took it", but "no input
+    could be identified at all", the signal that the selector itself needs
+    updating — and the only scenario that exercises `submitStep`'s
+    waitForSelector-timeout path. Teeth: dropping `describeDispatch` from the
+    FAILED line fails the diagnostic assertion (sabotage-verified).
+- `demo.test.ts` smoke-tests `npm run demo` (scripts/demo.ts) the same way:
+  spawns it headless, asserts the replica's banner, `=== COMPLETE ===`, the
+  `/finish` URL, and exit 0 — so the one runnable showcase left (the original
+  deployment is gone) cannot rot silently.
 - The mock app is plain-JS `React.createElement` served with React 18 UMD
   builds straight from `node_modules` (React 19 dropped UMD), so there is no
   bundler in the loop. The puzzles, modals, and distractors of the real
@@ -280,10 +302,11 @@ The original deployment is gone (HTTP 404 since mid-2026), so
 
 ```bash
 npm install
+npm run demo             # serve the mock challenge locally and watch the solver beat it (headed)
 npm run solve            # run the solver (CHALLENGE_URL, HEADLESS, STEP_TIMEOUT_MS env vars override defaults)
 npm test                 # unit tests for session.ts
 npm run test:integration # solver CLI vs the local mock challenge (needs Chromium installed)
-npm run typecheck        # tsc --noEmit over src/ and test/
+npm run typecheck        # tsc --noEmit over src/, test/, and scripts/
 ```
 
 `solve.ts` is executed with `tsx` (no build step). `tsc` is used only for type
