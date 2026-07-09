@@ -33,6 +33,13 @@ aborts the loop rather than grinding every remaining step through its full
 `FAILED` in seconds instead of minutes. (A step that navigated just after its
 timeout still counts as progress, so a single slow step never trips the abort.)
 
+When a run ends without reaching `/finish`, the solver also saves a full-page
+screenshot of the stuck page to `failure.png` (overridable with
+`FAILURE_SCREENSHOT`, or set that to `none` to skip it). On a redeployed
+challenge that picture is the fastest way to see what the step actually looks
+like now — the visual companion to the text diagnostic below. A clean run never
+writes it.
+
 ### Development
 
 ```bash
@@ -67,9 +74,12 @@ genuinely unpassable step — the run reports it as `FAILED`, lists it under
 "Steps that never confirmed", and exits non-zero rather than printing a false
 `COMPLETE`, its diagnostic line separating a code the site *rejected* (which
 was set fine — change the codes) from one the input *never took* (change the
-fiber walk or selector) — and a genuine cascade (an *early* step that stalls), where the
+fiber walk or selector) — a genuine cascade (an *early* step that stalls), where the
 solver aborts the loop after two consecutive non-advancing steps instead of
-grinding all the way to step 30 on the wrong page. The suite also smoke-tests
+grinding all the way to step 30 on the wrong page, and the failure screenshot
+(a genuine failure leaves a real PNG of the stuck page at the configured path
+and announces it, while a clean run writes nothing — proving the capture is
+gated on failure, not taken unconditionally). The suite also smoke-tests
 `npm run demo` end-to-end, so the one runnable showcase left can't rot
 silently. It needs the Playwright
 Chromium build (`npx playwright install chromium`).

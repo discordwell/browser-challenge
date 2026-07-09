@@ -138,6 +138,15 @@ the ground truth for success: the process exits non-zero if the run does not
 end on `/finish` (or if anything throws — the browser is closed via
 `try/finally` either way).
 
+When the run ends off `/finish`, the solver also captures a full-page
+screenshot of the stuck page (to `failure.png` by default, `FAILURE_SCREENSHOT`
+overrides the path, `none` disables it) before closing the browser. It is the
+visual counterpart to `describeDispatch`'s one-line text diagnostic: the text
+says *how* the code was set, the picture shows *what page the solver was on*
+when it gave up — the fastest way to see how a redeployed step changed. The
+capture is best-effort (a screenshot failure is logged, never allowed to mask
+the run failure) and gated on `!finished`, so a clean run never writes it.
+
 The per-step navigation wait is `STEP_TIMEOUT_MS` (default 3000, env-overridable)
 applied twice per step (the initial submit and one retry). If the URL fails to
 advance across `MAX_STUCK_STEPS` (2) consecutive steps the loop aborts early:
@@ -191,7 +200,7 @@ The original deployment is gone (HTTP 404 since mid-2026), so
   off, so the other scenarios are untouched.
 - `solve.test.ts` spawns the real CLI (`node --import tsx src/solve.ts`) as a
   child process with `CHALLENGE_URL` pointed at the mock and asserts the
-  observable contract over fourteen scenarios:
+  observable contract over fifteen scenarios:
   - a clean run — exit 0 + `=== COMPLETE ===` + final URL `/finish`;
   - the site gone (404) — exit 1 with the fail-fast goto message;
   - a malformed session (`?codes=29`) — exit 1 with `prepareSession`'s single
@@ -306,6 +315,15 @@ The original deployment is gone (HTTP 404 since mid-2026), so
     updating — and the only scenario that exercises `submitStep`'s
     waitForSelector-timeout path. Teeth: dropping `describeDispatch` from the
     FAILED line fails the diagnostic assertion (sabotage-verified).
+  - failure screenshot (`?broken=30` + `FAILURE_SCREENSHOT` set) — one test pins
+    both halves of the capture: a clean run (with the path set) reaches `/finish`
+    and writes *nothing* (`readFile` rejects with `ENOENT`), then a `?broken=30`
+    run sticks the last step, announces the path, and leaves a real PNG there
+    (asserted via the file's PNG magic number, not just its existence — so a
+    truncated/HTML stub wouldn't pass). Every other scenario runs with the
+    capture disabled (see `runSolver`), so this is the only place it is exercised
+    end-to-end. Teeth: it proves the screenshot is gated on `!finished` (absent
+    on the clean run) rather than taken unconditionally.
 - `demo.test.ts` smoke-tests `npm run demo` (scripts/demo.ts) the same way:
   spawns it headless, asserts the replica's banner, `=== COMPLETE ===`, the
   `/finish` URL, and exit 0 — so the one runnable showcase left (the original
@@ -320,7 +338,7 @@ The original deployment is gone (HTTP 404 since mid-2026), so
 ```bash
 npm install
 npm run demo             # serve the mock challenge locally and watch the solver beat it (headed)
-npm run solve            # run the solver (CHALLENGE_URL, HEADLESS, STEP_TIMEOUT_MS env vars override defaults)
+npm run solve            # run the solver (CHALLENGE_URL, HEADLESS, STEP_TIMEOUT_MS, FAILURE_SCREENSHOT env vars override defaults)
 npm test                 # unit tests for session.ts
 npm run test:integration # solver CLI vs the local mock challenge (needs Chromium installed)
 npm run typecheck        # tsc --noEmit over src/, test/, and scripts/

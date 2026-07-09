@@ -12,6 +12,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { startMockChallenge, startStatusServer } from "./mock-challenge/server.ts";
@@ -35,7 +38,16 @@ async function runSolver(
 ): Promise<SolverRun> {
   const child = spawn(process.execPath, ["--import", "tsx", "src/solve.ts"], {
     cwd: REPO_ROOT,
-    env: { ...process.env, CHALLENGE_URL: challengeUrl, HEADLESS: "1", ...extraEnv },
+    // Disable the failure screenshot by default so the failure scenarios below
+    // don't drop a `failure.png` into the repo root on every integration run;
+    // the dedicated screenshot test opts back in with an explicit temp path.
+    env: {
+      ...process.env,
+      CHALLENGE_URL: challengeUrl,
+      HEADLESS: "1",
+      FAILURE_SCREENSHOT: "",
+      ...extraEnv,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -536,6 +548,62 @@ test(
       assert.match(run.stderr, /Steps that never confirmed: 2, 3(?!,)/, detail);
       assert.doesNotMatch(run.stdout + run.stderr, /Step 4/, detail);
     } finally {
+      await mock.close();
+    }
+  },
+);
+
+/** PNG magic number — a real image starts with these eight bytes. */
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+test(
+  "solver saves a failure screenshot only when a run gets stuck, not on a clean run",
+  { timeout: 120_000 },
+  async () => {
+    const mock = await startMockChallenge();
+    // A unique temp path so parallel/other runs can't collide, and nothing lands
+    // in the repo. FAILURE_SCREENSHOT is disabled for every other test (see
+    // runSolver), so this is the only place the capture path is exercised e2e.
+    const shot = join(tmpdir(), `browser-challenge-failure-${process.pid}.png`);
+    await rm(shot, { force: true });
+    try {
+      // 1) A clean 30-step run reaches /finish, so the failure branch never runs
+      //    and no screenshot is written — even with the path explicitly set. This
+      //    is the teeth for "only on failure": the capture is gated on !finished,
+      //    not taken unconditionally.
+      const clean = await runSolver(mock.url, { FAILURE_SCREENSHOT: shot });
+      const cleanDetail = transcript(clean);
+      assert.equal(clean.exitCode, 0, `expected clean exit 0${cleanDetail}`);
+      assert.doesNotMatch(clean.stderr, /Saved a screenshot/, cleanDetail);
+      await assert.rejects(
+        readFile(shot),
+        /ENOENT/,
+        `a clean run must not write a screenshot${cleanDetail}`,
+      );
+
+      // 2) ?broken=30 sticks the last step (no cascade — steps 1-29 pass), the
+      //    same minimal genuine failure the FAILED-diagnostic test uses. The run
+      //    must leave a real PNG of the stuck page at the path and announce it, so
+      //    a redeploy debugger gets the visual companion to describeDispatch's text.
+      const stuck = await runSolver(`${mock.url}/?broken=30`, {
+        STEP_TIMEOUT_MS: "500",
+        FAILURE_SCREENSHOT: shot,
+      });
+      const stuckDetail = transcript(stuck);
+      assert.equal(stuck.exitCode, 1, `expected stuck exit 1${stuckDetail}`);
+      assert.ok(
+        stuck.stderr.includes(`Saved a screenshot of the stuck page to ${shot}`),
+        `FAILED run must announce the screenshot path${stuckDetail}`,
+      );
+      const bytes = await readFile(shot);
+      assert.ok(bytes.length > 0, `screenshot should be non-empty${stuckDetail}`);
+      assert.deepEqual(
+        [...bytes.subarray(0, PNG_SIGNATURE.length)],
+        PNG_SIGNATURE,
+        `screenshot should be a real PNG${stuckDetail}`,
+      );
+    } finally {
+      await rm(shot, { force: true });
       await mock.close();
     }
   },

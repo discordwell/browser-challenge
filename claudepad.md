@@ -1,5 +1,11 @@
 # Session Summaries
 
+## 2026-07-09T UTC - Failure screenshot on a stuck run (visual companion to describeDispatch)
+- **Added a failure screenshot to the solver.** On any run that ends without reaching `/finish`, `solveAll` now saves a full-page Playwright screenshot of the stuck page before closing the browser — the visual companion to `describeDispatch`'s one-line text diagnostic (the text says *how* the code was set; the picture shows *what page the solver was staring at* when it gave up). Fastest way to see how a redeployed step changed, and squarely on-theme with the whole `diagnostics.ts` split. Default path `failure.png` (already covered by `.gitignore`'s `*.png`); `FAILURE_SCREENSHOT` overrides it, `none`/`off`/`false`/`0`/empty disables. Gated on `!finished` and best-effort — a capture failure is logged via `truncate(errorMessage(err))`, never allowed to mask the run failure or flip the exit code (`process.exitCode = 1` sits outside the try/catch). A clean run never touches the disk.
+- **New integration test** (`solve.test.ts`, 15th solve scenario → 16 integration total): one test pins BOTH halves — a clean 30-step run *with the path set* reaches `/finish` and writes nothing (`readFile` rejects `ENOENT`, the teeth for the `!finished` gate), then `?broken=30` (sticks only the last step, no cascade) leaves a real PNG asserted via its 8-byte magic number (not mere existence) and announces the path. `runSolver` now injects `FAILURE_SCREENSHOT: ""` by default so the five existing failure scenarios don't drop `failure.png` into the repo root; the new test opts back in with a pid-unique `tmpdir()` path and cleans up.
+- **Reviewed clean.** Three independent diff-review agents (correctness / regression+cleanup / conventions+docs) all returned no findings: env-parse override ordering correct, exit code independent of the capture, `page` guaranteed alive at capture time, docs accurate (scenario count 14→15, env-var list gains `FAILURE_SCREENSHOT`, `.gitignore` re-verified). Verified: typecheck clean, `npm test` 37, `npm run test:integration` 16, no repo litter, plus a wet test of the real CLI's default `failure.png` path (12.9 KB PNG created + announced + auto-cleaned).
+- **A whole-codebase adversarial bug hunt surfaced two real latent bugs in the *untouched* `__dispatchAndSubmit` core / config** — deliberately NOT fixed this pass (each needs isolated, teeth-tested work, not a rider on a feature commit). Recorded verbatim under Key Findings → "Latent bugs found 2026-07-09".
+
 ## 2026-07-08T UTC - Land the demo/renamed WIP; pin the last describeDispatch branch e2e
 - **Landed the operator's in-progress WIP first** (was uncommitted at session start): `npm run demo` (`scripts/demo.ts` — serve the bundled mock on an ephemeral port, run the real solver CLI against it, headed by default; same entry point/env/exit code as `npm run solve`), its end-to-end smoke test (`demo.test.ts` — banner + COMPLETE + `/finish` + exit 0, so the one runnable showcase can't rot), `tsconfig` now typechecks `scripts/`, and the `?renamed=N` mock knob + integration test (step N's input placeholder loses "code", so the selector matches nothing → the "no code input found" triage branch end-to-end + the only exercise of `submitStep`'s waitForSelector-timeout path). Everything was coherent and complete; verified (typecheck clean, 37 unit, 14 integration) and committed (30cbf17).
 - **Then closed the last untested `describeDispatch` branch end-to-end** (db2de35). The FAILED-line diagnostic separates three redeploy causes: site rejected a set code (change codes), code dispatched but input never took it (fix fiber walk/selector), no input found. Branches 1 & 3 were pinned e2e (`?broken=30`→"set via React fiber", `?uncontrolled=30&broken=30`→"set via valueTracker fallback", `?renamed=2`→"no code input found"). The **middle** branch — `{ method: "fiber", applied: false }`, the most consequential "plumbing broke, not codes" signal — was only unit-tested (`?mismatch=22` reaches applied=false but the step *passes*, so it never lands on a FAILED line).
@@ -118,3 +124,49 @@ Since 2026-06-11 the solver IS wet-testable locally: `npm run test:integration`
 runs the real CLI against a React 18 mock of the challenge contract
 (`test/integration/mock-challenge/`), covering fiber dispatch, the Map patch,
 the step loop, and the exit codes.
+
+## Latent bugs found 2026-07-09 (adversarial whole-codebase review; NOT yet fixed)
+Two real gaps in the *untouched* solver core, surfaced by a bug hunt during the
+failure-screenshot pass. Left for a focused, teeth-tested future pass rather
+than riding on a feature commit — both live in the most fragile, deliberately
+hands-off code (`__dispatchAndSubmit` / env parsing).
+
+1. **valueTracker fallback is unreachable for an uncontrolled input whose
+   component also holds a string `useState`.** The fallback is gated on
+   `!applied && method === "none"` in `__dispatchAndSubmit` (`src/solve.ts`). If
+   an uncontrolled code input lives in a component that declares any *unrelated*
+   string state (a status/hint/error line), the fiber walk finds that state and
+   dispatches the code into it: `method` flips to `"fiber"` and `applied` stays
+   false (a `setState` can't change an uncontrolled input's DOM value), so the
+   fallback — the exact mechanism that would fill it — is skipped and the step
+   fails. The FAILED line also misreports it as "dispatched via fiber but the
+   input never took the code — wrong useState (hook reordering?)/selector",
+   pointing at the wrong cause. The mock's `UncontrolledStep` deliberately holds
+   NO string state (a "structural" invariant), which is the one sub-case where
+   the fallback *does* fire, so the suite never exercises this gap. **The fix is
+   subtle:** naively relaxing the gate to `!applied` breaks
+   `?mismatch=30&broken=30` — a strict *controlled* mismatch input lets the
+   native setter stick (onChange is a no-op, so no re-render overwrites it),
+   which would falsely report "set via valueTracker fallback" instead of the
+   required "never took the code". A correct fix must distinguish controlled vs
+   uncontrolled (e.g. the input host fiber's `memoizedProps.value !== undefined`)
+   and needs a new mock knob (uncontrolled input + an unrelated string
+   `useState`) plus a teeth test. This supersedes the 2026-07-08 "confirmed
+   correct, not a gap" note, which only weighed the controlled-mismatch case.
+
+2. **Negative `STEP_TIMEOUT_MS` bypasses the sanitizing fallback.**
+   `Number(process.env.STEP_TIMEOUT_MS) || 3000` (`src/solve.ts`) catches
+   `NaN`/`0` but not negatives: `Number("-1")` is a truthy `-1`, and Playwright
+   throws immediately on a negative `waitForURL` timeout, defeating the
+   confirm/retry waits. Masked on the local mock (synchronous pushState means the
+   post-timeout URL re-check still catches the advance) but wrong on a real
+   deployment where navigation isn't instant. Fix: `Number.isFinite(n) && n > 0 ?
+   n : 3000`. Hard to teeth-test against the mock (instant nav) — the clean home
+   for a *tested* fix is extracting env parsing into a pure `config.ts` (matching
+   the `session`/`navigation`/`diagnostics` split), which would also let the
+   `HEADLESS` and `FAILURE_SCREENSHOT` parsers gain unit tests.
+
+Minor, noted not filed: `CHALLENGE_URL=""` uses `??`, so an explicitly-empty
+value → `goto("")` and errors instead of using the default. The global
+`Map.prototype.get` patch remains a known, accepted tradeoff (scoped by
+`this.size === 30` + numeric key `31`).

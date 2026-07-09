@@ -37,6 +37,26 @@ const HEADLESS = /^(1|true)$/i.test(process.env.HEADLESS ?? "");
 const STEP_TIMEOUT_MS = Number(process.env.STEP_TIMEOUT_MS) || 3000;
 
 /**
+ * Where to save a screenshot of the page when a run ends without reaching
+ * `/finish`. On a redeployed challenge that now sticks on a step, a picture of
+ * the stuck page is the most useful artifact there is — it shows at a glance
+ * what the step actually looks like now — and it complements the text
+ * diagnostic ({@link describeDispatch}): the text says *how* the code was set,
+ * the screenshot shows *what the solver was staring at* when it gave up.
+ *
+ * Defaults to `failure.png` in the working directory (which `.gitignore`
+ * already excludes). Override FAILURE_SCREENSHOT with another path to move it,
+ * or set it to an empty value / `none` / `0` / `false` / `off` to skip capture.
+ * Only ever written on failure, so a clean run never touches the disk.
+ */
+const FAILURE_SCREENSHOT = (() => {
+  const raw = process.env.FAILURE_SCREENSHOT;
+  if (raw === undefined) return "failure.png";
+  const trimmed = raw.trim();
+  return /^(none|off|false|0)$/i.test(trimmed) ? "" : trimmed;
+})();
+
+/**
  * Abort the step loop after this many consecutive steps fail to change the URL.
  * Once a submitted code can't get us off the current page, every remaining step
  * just burns its full {@link STEP_TIMEOUT_MS} retry budget on the wrong page
@@ -314,6 +334,18 @@ async function solveAll(browser: Browser, totalStart: number) {
   if (!finished) {
     if (failedSteps.length > 0) {
       console.error(`Steps that never confirmed: ${failedSteps.join(", ")}`);
+    }
+    // Capture the stuck page. Best-effort: a screenshot failure (page crashed,
+    // path unwritable) must never mask the run failure that got us here, so it
+    // is swallowed with a note rather than thrown. fullPage so distractor
+    // widgets below the fold are captured too.
+    if (FAILURE_SCREENSHOT) {
+      try {
+        await page.screenshot({ path: FAILURE_SCREENSHOT, fullPage: true });
+        console.error(`Saved a screenshot of the stuck page to ${FAILURE_SCREENSHOT}`);
+      } catch (err) {
+        console.error(`Could not save failure screenshot: ${truncate(errorMessage(err))}`);
+      }
     }
     process.exitCode = 1;
   }
